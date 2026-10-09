@@ -73,6 +73,7 @@ public class MainActivity extends Activity implements SensorEventListener {
         setContentView(R.layout.activity_main);
 
         prefs = getSharedPreferences(MotionCueService.PREFS, MODE_PRIVATE);
+        MotionCueService.migrateSettings(prefs);
 
         switchCue = findViewById(R.id.switchCue);
         seekIntensity = findViewById(R.id.seekIntensity);
@@ -97,7 +98,7 @@ public class MainActivity extends Activity implements SensorEventListener {
         tvVersion.setText(getString(R.string.version_format,
                 installedVersionName(), UpdateInstaller.installedVersionCode(this)));
 
-        int amp = prefs.getInt(MotionCueService.KEY_AMP, 50);
+        int amp = prefs.getInt(MotionCueService.KEY_AMP, MotionCueService.DEFAULT_AMP);
         seekAmp.setProgress(amp);
         tvAmp.setText(getString(R.string.amp_label, amp));
         seekAmp.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {

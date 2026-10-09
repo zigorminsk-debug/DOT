@@ -59,6 +59,11 @@ public class MotionCueService extends Service implements SensorEventListener {
     static final String KEY_THICKNESS = "thickness";
     /** Толщина точек по умолчанию, dp (диаметр). */
     static final int DEFAULT_THICKNESS = 8;
+    /** Амплитуда движения по умолчанию, проценты. */
+    static final int DEFAULT_AMP = 50;
+    /** Версия схемы настроек. 2 — с сборки 7: амплитуда по умолчанию 50%, а не 100%. */
+    static final int SETTINGS_VERSION = 2;
+    static final String KEY_SETTINGS_VERSION = "settings_version";
 
     private static final String TAG = "MotionCue";
     private static final String CHANNEL_ID = "motioncalm";
@@ -240,6 +245,7 @@ public class MotionCueService extends Service implements SensorEventListener {
         }
 
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        migrateSettings(prefs);
         int intensity;
         if (intent != null && intent.hasExtra(EXTRA_INTENSITY)) {
             intensity = intent.getIntExtra(EXTRA_INTENSITY, 50);
@@ -268,10 +274,10 @@ public class MotionCueService extends Service implements SensorEventListener {
 
         int amp;
         if (intent != null && intent.hasExtra(EXTRA_AMP)) {
-            amp = intent.getIntExtra(EXTRA_AMP, 50);
+            amp = intent.getIntExtra(EXTRA_AMP, DEFAULT_AMP);
             prefs.edit().putInt(KEY_AMP, amp).apply();
         } else {
-            amp = prefs.getInt(KEY_AMP, 50);
+            amp = prefs.getInt(KEY_AMP, DEFAULT_AMP);
         }
         dotsView.setAmplitude(0.3f + 1.7f * amp / 100f);
         dotsView.setIntensity(0.1f + 0.9f * intensity / 100f);
@@ -293,6 +299,19 @@ public class MotionCueService extends Service implements SensorEventListener {
         }
 
         return START_STICKY;
+    }
+
+    /**
+     * Одноразовая замена настроек, сохранённых старыми сборками. Пока в файле настроек нет версии 2,
+     * амплитуда (в том числе сохранённые 100%) становится DEFAULT_AMP. Выбор пользователя после этого не трогаем.
+     */
+    static void migrateSettings(SharedPreferences prefs) {
+        if (prefs.getInt(KEY_SETTINGS_VERSION, 1) < SETTINGS_VERSION) {
+            prefs.edit()
+                    .putInt(KEY_AMP, DEFAULT_AMP)
+                    .putInt(KEY_SETTINGS_VERSION, SETTINGS_VERSION)
+                    .apply();
+        }
     }
 
     /** Добавляет окно с точками. false — если система не позволила его добавить. */

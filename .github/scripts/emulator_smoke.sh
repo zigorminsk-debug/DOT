@@ -56,6 +56,48 @@ echo "$INSTALL_OUT"
 grep -q "Success" <<< "$INSTALL_OUT" || fail "APK не установился"
 adb shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow
 
+echo "Проверяем сохранённую амплитуду: выбор пользователя и настройки старой сборки"
+# Настройки подменяем в файле приложения. Это возможно в отладочной сборке (run-as), а CI собирает именно её.
+seed_prefs() {
+    local tmp
+    tmp=$(mktemp)
+    {
+        echo "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>"
+        echo "<map>"
+        printf '%s\n' "$@"
+        echo "</map>"
+    } > "$tmp"
+    adb shell run-as "$PKG" mkdir -p "/data/data/$PKG/shared_prefs" || fail "run-as не работает: нужна отладочная сборка"
+    # Файл передаём через stdin: он создаётся от имени приложения, без общих папок телефона
+    adb shell run-as "$PKG" sh -c "cat > /data/data/$PKG/shared_prefs/motioncalm.xml" < "$tmp" || fail "не удалось записать настройки приложения"
+    rm -f "$tmp"
+}
+
+# Ждём, пока в дампе интерфейса появится нужный текст (с повторами, как при поиске переключателя)
+wait_for_text() {
+    local attempt
+    for attempt in 1 2 3 4 5 6 7 8; do
+        sleep 2
+        adb shell uiautomator dump /sdcard/window.xml > /dev/null 2>&1 || continue
+        XML=$(adb shell cat /sdcard/window.xml | tr -d '\r')
+        grep -qF "text=\"$1\"" <<< "$XML" && return 0
+    done
+    return 1
+}
+
+# Выбор 100%, сделанный в новой сборке (есть версия настроек), при запуске не сбрасывается
+adb shell am force-stop "$PKG"
+seed_prefs '<int name="amp" value="100" />' '<int name="settings_version" value="2" />'
+adb shell am start -n "$PKG/.MainActivity" > /dev/null 2>&1
+wait_for_text "Амплитуда движения: 100%" || fail "выбор пользователя 100% сбросился при запуске"
+
+# Настройки старой сборки (100% без версии схемы) становятся 50%
+adb shell am force-stop "$PKG"
+seed_prefs '<int name="amp" value="100" />'
+adb shell am start -n "$PKG/.MainActivity" > /dev/null 2>&1
+wait_for_text "Амплитуда движения: 50%" || fail "после обновления со старой сборки амплитуда не стала 50%"
+notice "Амплитуда: выбор 100% сохраняется, у настроек старой сборки становится 50%"
+
 echo "Запускаем службу подсказок"
 # Служба не экспортируется, поэтому извне её не запустить. Открываем приложение и нажимаем
 # переключатель подсказок: так проверяется тот же путь, что и у пользователя.
