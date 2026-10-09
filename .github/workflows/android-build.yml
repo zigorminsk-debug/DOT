@@ -34,10 +34,10 @@ jobs:
         working-directory: MotionCalm
     steps:
       - name: Получить код
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Установить JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -88,6 +88,45 @@ jobs:
       - name: Тесты и проверка кода (lint)
         if: env.SKIP_PUBLISH != 'true'
         run: sh ./gradlew --no-daemon --console=plain testReleaseUnitTest lintRelease
+
+      - name: Итоги тестов и lint
+        if: always() && env.SKIP_PUBLISH != 'true'
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import xml.etree.ElementTree as ET
+          from collections import Counter
+
+          tests = failures = skipped = 0
+          for f in glob.glob('app/build/test-results/testReleaseUnitTest/*.xml'):
+              r = ET.parse(f).getroot()
+              tests += int(r.get('tests', 0))
+              failures += int(r.get('failures', 0)) + int(r.get('errors', 0))
+              skipped += int(r.get('skipped', 0))
+          print(f"::notice title=Unit-тесты::Тестов: {tests}, с ошибками: {failures}, пропущено: {skipped}")
+
+          lint = 'app/build/reports/lint-results-release.xml'
+          if os.path.exists(lint):
+              issues = ET.parse(lint).getroot().findall('issue')
+              counts = Counter(i.get('severity') for i in issues)
+              print(f"::notice title=Lint::Ошибок: {counts.get('Error', 0)}, предупреждений: {counts.get('Warning', 0)}")
+              for i in issues:
+                  if i.get('severity') == 'Error':
+                      print(f"::error title=Lint {i.get('id')}::{i.get('message')}")
+          else:
+              print("::warning title=Lint::Отчёт lint не найден")
+          PY
+
+      - name: Сохранить отчёты тестов и lint
+        if: always() && env.SKIP_PUBLISH != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: reports-${{ github.run_number }}
+          path: |
+            MotionCalm/app/build/reports
+            MotionCalm/app/build/test-results
+          if-no-files-found: ignore
 
       - name: Собрать APK, подписанный постоянным ключом
         if: env.SKIP_PUBLISH != 'true'
@@ -156,7 +195,7 @@ jobs:
 
       - name: Сохранить APK в артефактах запуска
         if: env.SKIP_PUBLISH != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.APK_NAME }}
           path: ${{ env.APK_PATH }}
@@ -185,12 +224,3 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/release-key.p12"
 
-      - name: Сохранить отчёты сборки при ошибке
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-reports-${{ github.run_number }}
-          path: |
-            MotionCalm/app/build/reports
-            MotionCalm/app/build/test-results
-          if-no-files-found: ignore
