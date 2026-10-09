@@ -59,6 +59,11 @@ adb shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow
 echo "Запускаем службу подсказок"
 # Служба не экспортируется, поэтому извне её не запустить. Открываем приложение и нажимаем
 # переключатель подсказок: так проверяется тот же путь, что и у пользователя.
+# Телефон стоит вертикально в покое: опора силы тяжести инициализируется по этим показаниям
+emu_accel_rest() {
+    adb emu sensor set acceleration "0:9.81:0" > /dev/null 2>&1 || fail "эмулятор не принял показания акселерометра"
+}
+emu_accel_rest
 adb logcat -c
 adb shell am start -n "$PKG/.MainActivity" > /dev/null 2>&1
 # Холодный запуск на эмуляторе занимает несколько секунд: ищем переключатель с повторами
@@ -78,6 +83,50 @@ adb shell input tap $(( (X1 + X2) / 2 )) $(( (Y1 + Y2) / 2 ))
 sleep 8
 service_alive || fail "процесс приложения не запустился после включения переключателя"
 [ "$(heartbeats | grep -c heartbeat)" -ge 1 ] || fail "служба не пишет heartbeat после включения переключателя"
+
+echo "Проверяем реакцию точек на ускорение: эмулятор задаёт показания акселерометра"
+# Телефон стоит вертикально экраном к водителю: x вправо, y вверх, z от экрана к водителю.
+# Вперёд — от экрана, потому что экран смотрит на водителя: разгон — это ускорение по оси z со знаком минус.
+emu_accel() {
+    adb emu sensor set acceleration "$1" > /dev/null 2>&1 || fail "эмулятор не принял показания акселерометра: $1"
+}
+motion_values() {
+    adb logcat -d -s MotionCue:I | grep ' motion ' | sed -n "s/.*$1=\([-+0-9.]*\).*/\1/p"
+}
+
+emu_accel "0:9.81:0"
+sleep 4
+adb logcat -c
+emu_accel "0:9.81:-2.5"                       # разгон вперёд
+sleep 3
+MAX_FWD=$(motion_values fwd | sort -g | tail -n 1)
+notice "разгон: вперёд $MAX_FWD м/с²"
+awk -v v="$MAX_FWD" 'BEGIN { exit !(v + 0 >= 1.8) }' || fail "при разгоне точки не реагируют вперёд: $MAX_FWD"
+
+emu_accel "0:9.81:0"                          # покой: точки должны вернуться по вперёд
+sleep 5
+adb logcat -c
+sleep 2
+LAST_FWD=$(motion_values fwd | tail -n 1)
+awk -v v="$LAST_FWD" 'BEGIN { exit !(v + 0 <= 0.5 && v + 0 >= -0.5) }' || fail "в покое вперёд не вернулся к нулю: $LAST_FWD"
+
+adb logcat -c
+emu_accel "0:9.81:2.5"                        # торможение
+sleep 3
+MIN_FWD=$(motion_values fwd | sort -g | head -n 1)
+notice "торможение: вперёд $MIN_FWD м/с²"
+awk -v v="$MIN_FWD" 'BEGIN { exit !(v + 0 <= -1.8) }' || fail "при торможении точки не реагируют назад: $MIN_FWD"
+
+emu_accel "0:9.81:0"
+sleep 5
+adb logcat -c
+emu_accel "2.5:9.81:0"                        # поворот направо: ускорение вправо по оси x
+sleep 3
+MAX_LAT=$(motion_values lat | sort -g | tail -n 1)
+notice "поворот направо: вбок $MAX_LAT м/с²"
+awk -v v="$MAX_LAT" 'BEGIN { exit !(v + 0 >= 1.8) }' || fail "при повороте точки не реагируют вбок: $MAX_LAT"
+emu_accel "0:9.81:0"
+sleep 4
 
 echo "Выключаем экран"
 adb shell input keyevent 223                      # SLEEP

@@ -272,16 +272,17 @@ public class MainActivity extends Activity implements SensorEventListener {
         }
         lastDebugUpdateMs = nowMs;
         long nowNs = System.nanoTime();
-        float x = event.values[0];
-        float y = event.values[1];
-        float z = event.values[2];
+        // Ускорение автомобиля, которое реально используют точки (без силы тяжести)
+        float x = MotionCueService.debugAx;
+        float y = MotionCueService.debugAy;
+        float z = MotionCueService.debugAz;
         tvSensor.setText(String.format(Locale.US,
                 "Экран: %-9s окно: %-3s\n"
                         + "Датчик: %-9s служба: %-3s\n"
                         + "Событие: %s\n"
                         + "Кадр:    %s\n"
                         + "Перезапуски: датч. %2d, кадры %2d\n"
-                        + "a, м/с²: %+6.2f %+6.2f %+6.2f\n"
+                        + "ускорение, м/с²: %+5.2f %+5.2f %+5.2f\n"
                         + "Вперёд %+6.2f  вбок %+6.2f\n"
                         + "Точки: X %+6.1f  Y %+6.1f",
                 MotionCueService.debugScreenOn ? "включён" : "выключен",

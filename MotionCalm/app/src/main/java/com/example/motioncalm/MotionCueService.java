@@ -28,6 +28,8 @@ import android.util.Log;
 import android.view.Choreographer;
 import android.view.WindowManager;
 
+import java.util.Locale;
+
 /**
  * Фоновый сервис: показывает DotsView поверх всех приложений
  * и обновляет смещение точек по данным датчиков.
@@ -36,6 +38,9 @@ import android.view.WindowManager;
  * они останавливаются. Когда экран включают или телефон разблокируют, запускаются снова.
  * Пока экран включён, сторож раз в секунду проверяет датчики, кадры и окно и чинит их,
  * если они замолчали.
+ *
+ * Ускорение берём из сырого акселерометра, а силу тяжести отделяем через GravityTracker.
+ * Так разгон и торможение не «уходят» в наклон, как это бывает у системного линейного датчика.
  */
 public class MotionCueService extends Service implements SensorEventListener {
 
@@ -58,7 +63,6 @@ public class MotionCueService extends Service implements SensorEventListener {
     private static final String TAG = "MotionCue";
     private static final String CHANNEL_ID = "motioncalm";
     private static final int NOTIF_ID = 1;
-    private static final float GRAVITY_ALPHA = 0.9f;  // низкочастотный фильтр для оценки силы тяжести
     private static final float SMOOTH_ALPHA = 0.25f;  // сглаживание ускорения
     private static final long SENSOR_STALE_NS = 300_000_000L; // 0.3 с без данных -> точки возвращаются
     private static final long TEST_DURATION_MS = 8000;
@@ -76,6 +80,10 @@ public class MotionCueService extends Service implements SensorEventListener {
     public static volatile float debugForward = 0f;
     /** Ускорение автомобиля вправо (+) и влево (-), м/с². */
     public static volatile float debugLateral = 0f;
+    /** Ускорение автомобиля в координатах телефона, м/с². */
+    public static volatile float debugAx = 0f;
+    public static volatile float debugAy = 0f;
+    public static volatile float debugAz = 0f;
     public static volatile boolean debugOverlayAdded = false;
     public static volatile boolean debugScreenOn = true;
     public static volatile boolean debugSensorOn = false;
@@ -91,22 +99,17 @@ public class MotionCueService extends Service implements SensorEventListener {
     private PowerManager powerManager;
     private DotsView dotsView;
 
-    /** Датчик линейного ускорения (без силы тяжести), если он есть. */
-    private Sensor linearSensor;
-    /** Обычный акселерометр: нужен, если нет линейного датчика или датчика гравитации. */
+    /** Сырой акселерометр: основной датчик. Без него движения нет. */
     private Sensor accelSensor;
-    /** Датчик гравитации: даёт направление «вверх» относительно телефона. */
+    /** Датчик гравитации: нужен для начальной установки опоры и для сверки после перестановки телефона. */
     private Sensor gravitySensor;
-    /** Датчик, по которому ведётся сторож: линейный, а если его нет, акселерометр. */
-    private Sensor primarySensor;
-    private boolean hasGravitySensor;
 
-    /** Сила тяжести в координатах устройства, направлена вверх, м/с². */
-    private final float[] gravity = new float[3];
-    /** Низкочастотная оценка силы тяжести по акселерометру. */
-    private final float[] lowAccel = new float[3];
-    /** Сглаженное ускорение без силы тяжести, координаты устройства. */
+    private final GravityTracker gravityTracker = new GravityTracker();
+    private final float[] fusedGravity = new float[3];
+    private boolean fusedGravityValid = false;
+    /** Сглаженное ускорение автомобиля в координатах телефона, м/с². */
     private final float[] smooth = new float[3];
+    private long lastAccelNs = 0;
 
     private int dotSizeDp = DEFAULT_THICKNESS;
 
@@ -208,11 +211,8 @@ public class MotionCueService extends Service implements SensorEventListener {
         sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
         powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
 
-        linearSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION);
         accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY);
-        hasGravitySensor = gravitySensor != null;
-        primarySensor = linearSensor != null ? linearSensor : accelSensor;
 
         screenOn = powerManager.isInteractive();
         debugScreenOn = screenOn;
@@ -234,7 +234,7 @@ public class MotionCueService extends Service implements SensorEventListener {
 
         boolean test = intent != null && ACTION_TEST.equals(intent.getAction());
         // Для обычной работы нужен датчик; тест движения обходится без него.
-        if (!Settings.canDrawOverlays(this) || (primarySensor == null && !test)) {
+        if (!Settings.canDrawOverlays(this) || (accelSensor == null && !test)) {
             stopCue();
             return START_NOT_STICKY;
         }
@@ -381,21 +381,21 @@ public class MotionCueService extends Service implements SensorEventListener {
     }
 
     /**
-     * Подписка на датчики. Основной датчик даёт ускорение. Датчик гравитации даёт направление «вверх».
-     * Акселерометр добавляется, если нет датчика гравитации (тогда гравитацию оцениваем сами).
+     * Подписка на датчики: акселерометр и (если есть) датчик гравитации.
+     * Опору силы тяжести сбрасываем: после паузы телефон могли переставить.
      */
     private void subscribeSensor() {
-        if (sensorSubscribed || primarySensor == null || dotsView == null) {
+        if (sensorSubscribed || accelSensor == null || dotsView == null) {
             return;
         }
-        sensorSubscribed = sensorManager.registerListener(this, primarySensor, SensorManager.SENSOR_DELAY_GAME);
+        sensorSubscribed = sensorManager.registerListener(this, accelSensor, SensorManager.SENSOR_DELAY_GAME);
         if (sensorSubscribed) {
             if (gravitySensor != null) {
                 sensorManager.registerListener(this, gravitySensor, SensorManager.SENSOR_DELAY_GAME);
             }
-            if (primarySensor != accelSensor && !hasGravitySensor && accelSensor != null) {
-                sensorManager.registerListener(this, accelSensor, SensorManager.SENSOR_DELAY_GAME);
-            }
+            gravityTracker.invalidate();
+            fusedGravityValid = false;
+            lastAccelNs = 0;
         }
         debugSensorOn = sensorSubscribed;
         lastSensorNs = System.nanoTime();   // отсчёт тишины начинается заново
@@ -444,7 +444,7 @@ public class MotionCueService extends Service implements SensorEventListener {
             }
         }
 
-        if (CueHealth.sensorNeedsSubscribe(screenOn, testing, primarySensor != null, sensorSubscribed,
+        if (CueHealth.sensorNeedsSubscribe(screenOn, testing, accelSensor != null, sensorSubscribed,
                 nowNs, lastSensorNs)) {
             if (sensorSubscribed) {
                 Log.w(TAG, "датчик молчит, переподписываюсь");
@@ -462,6 +462,10 @@ public class MotionCueService extends Service implements SensorEventListener {
             frameLoopScheduled = false;
             startFrameLoop();
         }
+
+        // Строка раз в секунду: по ней видно, как реагируют точки на разгон, торможение и поворот
+        Log.i(TAG, String.format(Locale.US, "motion fwd=%+.2f lat=%+.2f ax=%+.2f ay=%+.2f az=%+.2f",
+                debugForward, debugLateral, debugAx, debugAy, debugAz));
 
         if (nowNs - lastHeartbeatNs >= HEARTBEAT_PERIOD_NS) {
             lastHeartbeatNs = nowNs;
@@ -496,12 +500,10 @@ public class MotionCueService extends Service implements SensorEventListener {
         TileService.requestListeningState(this, new ComponentName(this, CueTileService.class));
     }
 
-    /** Есть ли на телефоне датчик, которым измеряется движение. */
+    /** Есть ли на телефоне акселерометр, по которому измеряется движение. */
     static boolean hasMotionSensor(Context context) {
         SensorManager manager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
-        return manager != null
-                && (manager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION) != null
-                || manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null);
+        return manager != null && manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null;
     }
 
     private void startAsForeground() {
@@ -537,48 +539,46 @@ public class MotionCueService extends Service implements SensorEventListener {
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        float[] v = event.values;
         int type = event.sensor.getType();
         if (type == Sensor.TYPE_GRAVITY) {
-            System.arraycopy(v, 0, gravity, 0, 3);
+            System.arraycopy(event.values, 0, fusedGravity, 0, 3);
+            fusedGravityValid = true;
             return;
         }
         if (type == Sensor.TYPE_ACCELEROMETER) {
-            // Низкочастотный фильтр: оценка силы тяжести, если нет датчика гравитации
-            for (int k = 0; k < 3; k++) {
-                lowAccel[k] = GRAVITY_ALPHA * lowAccel[k] + (1 - GRAVITY_ALPHA) * v[k];
-            }
-            if (!hasGravitySensor) {
-                System.arraycopy(lowAccel, 0, gravity, 0, 3);
-            }
-            if (primarySensor != accelSensor) {
-                return;   // ускорение берём из линейного датчика
-            }
-            processAcceleration(v[0] - gravity[0], v[1] - gravity[1], v[2] - gravity[2]);
-            return;
-        }
-        if (type == Sensor.TYPE_LINEAR_ACCELERATION) {
-            processAcceleration(v[0], v[1], v[2]);
+            processAccelerometer(event.values, event.timestamp);
         }
     }
 
-    /** Ускорение автомобиля (без силы тяжести) → движение точек. */
-    private void processAcceleration(float ax, float ay, float az) {
+    /** Показания акселерометра → ускорение автомобиля → движение точек. */
+    private void processAccelerometer(float[] f, long timestampNs) {
         if (testing) {
             return;   // во время теста точки движутся по сценарию, датчик не мешает
         }
-        smooth[0] += SMOOTH_ALPHA * (ax - smooth[0]);
-        smooth[1] += SMOOTH_ALPHA * (ay - smooth[1]);
-        smooth[2] += SMOOTH_ALPHA * (az - smooth[2]);
+        if (!gravityTracker.isReady()) {
+            gravityTracker.reset(fusedGravityValid ? fusedGravity : f);
+        }
+        float dtS = lastAccelNs == 0
+                ? 0.02f
+                : Math.min(0.1f, Math.max(0.001f, (timestampNs - lastAccelNs) * 1e-9f));
+        lastAccelNs = timestampNs;
+
+        float[] a = gravityTracker.update(f, dtS, fusedGravityValid ? fusedGravity : null);
+        smooth[0] += SMOOTH_ALPHA * (a[0] - smooth[0]);
+        smooth[1] += SMOOTH_ALPHA * (a[1] - smooth[1]);
+        smooth[2] += SMOOTH_ALPHA * (a[2] - smooth[2]);
 
         int rotation = windowManager.getDefaultDisplay().getRotation();
-        float[] r = CueMotion.screenAccel(smooth, gravity, rotation);
+        float[] r = CueMotion.screenAccel(smooth, gravityTracker.reference(), rotation);
 
         debugEvents++;
         targetUx = r[0];
         targetUy = r[1];
         debugForward = r[2];
         debugLateral = r[3];
+        debugAx = smooth[0];
+        debugAy = smooth[1];
+        debugAz = smooth[2];
         long nowNs = System.nanoTime();
         lastSensorNs = nowNs;
         debugSensorAtNs = nowNs;
