@@ -2,6 +2,17 @@ plugins {
     id 'com.android.application'
 }
 
+// Версия берётся из MotionCalm/version.properties (versionName и номер сборки versionCode).
+def versionProps = new Properties()
+rootProject.file('version.properties').withInputStream { versionProps.load(it) }
+def appVersionName = versionProps.getProperty('versionName')
+def appVersionCode = versionProps.getProperty('versionCode').toInteger()
+
+// Постоянный ключ подписи релиза передаётся переменными окружения (в CI — из GitHub Secrets).
+// Сам файл ключа в репозиторий не кладём. Если переменных нет, release-сборка не подписывается,
+// а CI такой APK не публикует.
+def releaseKeystore = System.getenv('RELEASE_KEYSTORE')
+
 android {
     namespace 'com.example.motioncalm'
     compileSdk 34
@@ -10,13 +21,28 @@ android {
         applicationId "com.example.motioncalm"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode appVersionCode
+        versionName appVersionName
+    }
+
+    signingConfigs {
+        release {
+            if (releaseKeystore) {
+                storeFile file(releaseKeystore)
+                storeType System.getenv('RELEASE_KEYSTORE_TYPE') ?: 'pkcs12'
+                storePassword System.getenv('RELEASE_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('RELEASE_KEY_ALIAS')
+                keyPassword System.getenv('RELEASE_KEY_PASSWORD')
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
+            if (releaseKeystore) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
@@ -24,4 +50,8 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
 }

@@ -144,7 +144,14 @@ public class MotionCueService extends Service implements SensorEventListener {
             return START_NOT_STICKY;
         }
 
-        if (!Settings.canDrawOverlays(this) || sensor == null) {
+        // Сразу переводим сервис в foreground. После startForegroundService() Android ждёт
+        // вызова startForeground(), даже если сервис тут же остановится по ошибке.
+        startAsForeground();
+
+        boolean test = intent != null && ACTION_TEST.equals(intent.getAction());
+        // Для обычной работы нужен датчик; тест движения обходится без него.
+        if (!Settings.canDrawOverlays(this) || (sensor == null && !test)) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -158,11 +165,15 @@ public class MotionCueService extends Service implements SensorEventListener {
             intensity = prefs.getInt(KEY_INTENSITY, 50);
         }
 
-        startAsForeground();
-
         if (dotsView == null) {
-            addOverlay();
-            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME);
+            if (!addOverlay()) {
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            if (sensor != null) {
+                sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME);
+            }
         }
         int dots;
         if (intent != null && intent.hasExtra(EXTRA_DOTS)) {
@@ -183,7 +194,7 @@ public class MotionCueService extends Service implements SensorEventListener {
         dotsView.setAmplitude(0.3f + 1.7f * amp / 100f);
         dotsView.setIntensity(0.1f + 0.9f * intensity / 100f);
 
-        if (intent != null && ACTION_TEST.equals(intent.getAction()) && !testing) {
+        if (test && !testing) {
             testing = true;
             testStart = SystemClock.uptimeMillis();
             handler.post(testTick);
@@ -192,8 +203,9 @@ public class MotionCueService extends Service implements SensorEventListener {
         return START_STICKY;
     }
 
-    private void addOverlay() {
-        dotsView = new DotsView(this);
+    /** Добавляет окно с точками. false — если система не позволила его добавить. */
+    private boolean addOverlay() {
+        DotsView view = new DotsView(this);
 
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -210,10 +222,17 @@ public class MotionCueService extends Service implements SensorEventListener {
                 PixelFormat.TRANSLUCENT);
         lp.setTitle("MotionCalm");
 
-        windowManager.addView(dotsView, lp);
+        try {
+            windowManager.addView(view, lp);
+        } catch (RuntimeException e) {
+            // Например, разрешение «поверх других окон» отозвали прямо перед запуском.
+            return false;
+        }
+        dotsView = view;
         debugOverlayAdded = true;
         lastFrameNs = 0;
         Choreographer.getInstance().postFrameCallback(frameCallback);
+        return true;
     }
 
     private void startAsForeground() {

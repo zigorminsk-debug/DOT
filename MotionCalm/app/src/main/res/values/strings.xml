@@ -18,4 +18,20 @@
     <string name="notif_channel">Подсказки движения</string>
     <string name="notif_text">Визуальные подсказки движения включены</string>
     <string name="notif_stop">Выключить</string>
+    <string name="sensor_missing">Датчик ускорения не найден на этом устройстве</string>
+    <string name="status_no_sensor">На этом телефоне нет датчика ускорения, подсказки движения недоступны.</string>
+    <string name="version_format">Версия %1$s (сборка %2$d)</string>
+    <string name="update_title">Обновления</string>
+    <string name="update_check_button">Проверить обновления на GitHub</string>
+    <string name="update_checking">Проверяю, есть ли новая сборка…</string>
+    <string name="update_up_to_date">Установлена последняя сборка.</string>
+    <string name="update_no_builds">На GitHub пока нет сборок, которые можно установить.</string>
+    <string name="update_available">Доступна версия %1$s (сборка %2$d).</string>
+    <string name="update_install_button">Установить версию %1$s (сборка %2$d)</string>
+    <string name="update_error">Не удалось проверить обновления: %1$s</string>
+    <string name="update_downloading">Загружаю обновление с GitHub…</string>
+    <string name="update_confirm_in_system">Подтвердите установку в окне Android. Если окна не появилось, нажмите кнопку установки ещё раз.</string>
+    <string name="update_need_unknown_sources">Разрешите установку приложений из этого источника в открывшихся настройках и нажмите кнопку установки ещё раз.</string>
+    <string name="update_installed">Обновление установлено.</string>
+    <string name="update_failed">Установка не удалась: %1$s</string>
 </resources>

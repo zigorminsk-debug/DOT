@@ -1,0 +1,15 @@
+# Сборка и локальные кэши
+build/
+.gradle/
+.idea/
+*.iml
+local.properties
+
+# Ключи подписи и секреты: никогда не коммитить
+*.jks
+*.p12
+keystore.properties
+release-keys/
+
+# APK публикуются в GitHub Releases, а не лежат в git
+*.apk

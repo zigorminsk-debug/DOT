@@ -4,26 +4,31 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.net.Uri;
-import android.os.Build;
-import android.os.Bundle;
+import android.content.pm.PackageManager;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CompoundButton;
-import android.widget.RadioButton;
+import android.widget.ProgressBar;
 import android.widget.RadioGroup;
 import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import java.io.File;
 import java.util.Locale;
 
 public class MainActivity extends Activity implements SensorEventListener {
+
+    /** Сколько символов примечаний к релизу показывать в статусе обновления. */
+    private static final int MAX_NOTES_CHARS = 800;
 
     private Switch switchCue;
     private SeekBar seekIntensity;
@@ -34,12 +39,20 @@ public class MainActivity extends Activity implements SensorEventListener {
     private TextView tvIntensity;
     private TextView tvStatus;
     private TextView tvSensor;
+    private TextView tvVersion;
+    private Button btnCheckUpdate;
+    private TextView tvUpdateStatus;
+    private ProgressBar progressUpdate;
+    private Button btnInstallUpdate;
 
     private SensorManager sensorManager;
     private Sensor sensor;
 
     private SharedPreferences prefs;
     private boolean updatingUi = false;
+
+    /** Сборка, найденная последней проверкой. null — устанавливать пока нечего. */
+    private ReleaseInfo pendingRelease;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,6 +67,18 @@ public class MainActivity extends Activity implements SensorEventListener {
         btnTest = findViewById(R.id.btnTest);
         seekAmp = findViewById(R.id.seekAmp);
         tvAmp = findViewById(R.id.tvAmp);
+        tvIntensity = findViewById(R.id.tvIntensity);
+        tvStatus = findViewById(R.id.tvStatus);
+        tvSensor = findViewById(R.id.tvSensor);
+        tvVersion = findViewById(R.id.tvVersion);
+        btnCheckUpdate = findViewById(R.id.btnCheckUpdate);
+        tvUpdateStatus = findViewById(R.id.tvUpdateStatus);
+        progressUpdate = findViewById(R.id.progressUpdate);
+        btnInstallUpdate = findViewById(R.id.btnInstallUpdate);
+
+        tvVersion.setText(getString(R.string.version_format,
+                installedVersionName(), UpdateInstaller.installedVersionCode(this)));
+
         int amp = prefs.getInt(MotionCueService.KEY_AMP, 50);
         seekAmp.setProgress(amp);
         tvAmp.setText(getString(R.string.amp_label, amp));
@@ -77,6 +102,7 @@ public class MainActivity extends Activity implements SensorEventListener {
             public void onStopTrackingTouch(SeekBar seekBar) {
             }
         });
+
         btnTest.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -84,22 +110,16 @@ public class MainActivity extends Activity implements SensorEventListener {
                     requestOverlayPermission();
                     return;
                 }
+                // Проверка отрисовки работает и без датчика: движение имитируется.
                 Intent intent = new Intent(MainActivity.this, MotionCueService.class)
                         .setAction(MotionCueService.ACTION_TEST)
                         .putExtra(MotionCueService.EXTRA_INTENSITY, seekIntensity.getProgress())
                         .putExtra(MotionCueService.EXTRA_DOTS, currentDotLevel())
-                .putExtra(MotionCueService.EXTRA_AMP, seekAmp.getProgress());
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(intent);
-                } else {
-                    startService(intent);
-                }
+                        .putExtra(MotionCueService.EXTRA_AMP, seekAmp.getProgress());
+                sendToService(intent);
                 setSwitchSilently(true);
             }
         });
-        tvIntensity = findViewById(R.id.tvIntensity);
-        tvStatus = findViewById(R.id.tvStatus);
-        tvSensor = findViewById(R.id.tvSensor);
 
         sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
         sensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION);
@@ -107,7 +127,7 @@ public class MainActivity extends Activity implements SensorEventListener {
             sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         }
         if (sensor == null) {
-            tvSensor.setText("Датчик ускорения не найден на этом устройстве");
+            tvSensor.setText(R.string.sensor_missing);
         }
 
         int dotLevel = prefs.getInt(MotionCueService.KEY_DOTS, 1);
@@ -138,6 +158,11 @@ public class MainActivity extends Activity implements SensorEventListener {
                         requestOverlayPermission();
                         return;
                     }
+                    if (sensor == null) {
+                        setSwitchSilently(false);
+                        updateStatus();
+                        return;
+                    }
                     startCue();
                 } else {
                     stopCue();
@@ -165,9 +190,12 @@ public class MainActivity extends Activity implements SensorEventListener {
             }
         });
 
+        btnCheckUpdate.setOnClickListener(v -> checkForUpdates());
+        btnInstallUpdate.setOnClickListener(v -> installUpdate());
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
     }
@@ -216,12 +244,20 @@ public class MainActivity extends Activity implements SensorEventListener {
                 .putExtra(MotionCueService.EXTRA_INTENSITY, seekIntensity.getProgress())
                 .putExtra(MotionCueService.EXTRA_DOTS, currentDotLevel())
                 .putExtra(MotionCueService.EXTRA_AMP, seekAmp.getProgress());
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        sendToService(intent);
+        setSwitchSilently(true);
+    }
+
+    /**
+     * Сервис уже запущен в foreground, поэтому новые настройки передаём обычным startService.
+     * startForegroundService нужен только для первого запуска.
+     */
+    private void sendToService(Intent intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !MotionCueService.running) {
             startForegroundService(intent);
         } else {
             startService(intent);
         }
-        setSwitchSilently(true);
     }
 
     private int currentDotLevel() {
@@ -258,10 +294,124 @@ public class MainActivity extends Activity implements SensorEventListener {
     private void updateStatus() {
         if (!Settings.canDrawOverlays(this)) {
             tvStatus.setText(R.string.status_need_permission);
+        } else if (sensor == null) {
+            tvStatus.setText(R.string.status_no_sensor);
         } else if (MotionCueService.running) {
             tvStatus.setText(R.string.status_running);
         } else {
             tvStatus.setText(R.string.status_ready);
         }
+    }
+
+    private String installedVersionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (PackageManager.NameNotFoundException e) {
+            return "?";
+        }
+    }
+
+    // ---- Обновления ----
+
+    /** Проверка в фоне: запрос к GitHub не должен блокировать экран. */
+    private void checkForUpdates() {
+        btnCheckUpdate.setEnabled(false);
+        btnInstallUpdate.setVisibility(View.GONE);
+        pendingRelease = null;
+        tvUpdateStatus.setText(R.string.update_checking);
+        final long current = UpdateInstaller.installedVersionCode(this);
+        new Thread(() -> {
+            try {
+                ReleaseInfo newest = ReleaseInfo.newest(UpdateChecker.fetchReleases());
+                runOnUiThread(() -> onUpdateChecked(newest, current));
+            } catch (Exception e) {
+                String reason = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                runOnUiThread(() -> onUpdateCheckFailed(reason));
+            }
+        }, "update-check").start();
+    }
+
+    private void onUpdateChecked(ReleaseInfo newest, long current) {
+        if (isFinishing()) {
+            return;
+        }
+        btnCheckUpdate.setEnabled(true);
+        if (newest == null) {
+            tvUpdateStatus.setText(R.string.update_no_builds);
+        } else if (newest.build > current) {
+            pendingRelease = newest;
+            String status = getString(R.string.update_available, newest.versionName, newest.build);
+            String notes = newest.body.trim();
+            if (!notes.isEmpty()) {
+                if (notes.length() > MAX_NOTES_CHARS) {
+                    notes = notes.substring(0, MAX_NOTES_CHARS) + "…";
+                }
+                status = status + "\n\n" + notes;
+            }
+            tvUpdateStatus.setText(status);
+            btnInstallUpdate.setText(getString(R.string.update_install_button, newest.versionName, newest.build));
+            btnInstallUpdate.setEnabled(true);
+            btnInstallUpdate.setVisibility(View.VISIBLE);
+        } else {
+            tvUpdateStatus.setText(R.string.update_up_to_date);
+        }
+    }
+
+    private void onUpdateCheckFailed(String reason) {
+        if (isFinishing()) {
+            return;
+        }
+        btnCheckUpdate.setEnabled(true);
+        tvUpdateStatus.setText(getString(R.string.update_error, reason));
+    }
+
+    private void installUpdate() {
+        final ReleaseInfo release = pendingRelease;
+        if (release == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
+            // Пользователь должен разрешить установку из этого приложения.
+            tvUpdateStatus.setText(R.string.update_need_unknown_sources);
+            startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())));
+            return;
+        }
+        btnInstallUpdate.setEnabled(false);
+        btnCheckUpdate.setEnabled(false);
+        progressUpdate.setProgress(0);
+        progressUpdate.setVisibility(View.VISIBLE);
+        tvUpdateStatus.setText(R.string.update_downloading);
+        new Thread(() -> {
+            try {
+                File apk = UpdateInstaller.download(this, release,
+                        percent -> runOnUiThread(() -> progressUpdate.setProgress(percent)));
+                UpdateInstaller.install(this, apk);
+                runOnUiThread(this::onInstallStarted);
+            } catch (Exception e) {
+                String reason = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                runOnUiThread(() -> onInstallFailed(reason));
+            }
+        }, "update-install").start();
+    }
+
+    private void onInstallStarted() {
+        if (isFinishing()) {
+            return;
+        }
+        progressUpdate.setVisibility(View.GONE);
+        btnInstallUpdate.setEnabled(true);
+        btnCheckUpdate.setEnabled(true);
+        tvUpdateStatus.setText(R.string.update_confirm_in_system);
+    }
+
+    private void onInstallFailed(String reason) {
+        if (isFinishing()) {
+            return;
+        }
+        progressUpdate.setVisibility(View.GONE);
+        btnInstallUpdate.setEnabled(true);
+        btnCheckUpdate.setEnabled(true);
+        tvUpdateStatus.setText(getString(R.string.update_failed, reason));
     }
 }

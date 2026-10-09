@@ -51,4 +51,14 @@ public class DotPhysics {
     public float offsetY() {
         return BASE_MAX * amp * (float) Math.tanh(y / (BASE_MAX * amp));
     }
+
+    /** Скорость точек по X, dp/с (для диагностики и тестов). */
+    public float velocityX() {
+        return vx;
+    }
+
+    /** Скорость точек по Y, dp/с (для диагностики и тестов). */
+    public float velocityY() {
+        return vy;
+    }
 }

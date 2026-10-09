@@ -1,0 +1,196 @@
+name: Сборка APK
+
+# Каждое изменение MotionCalm/ собирает подписанный APK и публикует его как релиз GitHub
+# с тегом v<версия>-build<сборка>. Приложение ищет эти релизы в «Проверить обновления».
+on:
+  push:
+    branches:
+      - main
+      - 'arena/**'
+    paths:
+      - 'MotionCalm/**'
+      - '.github/workflows/android-build.yml'
+      - '.github/scripts/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Публикацию не прерываем на полпути: иначе релиз останется без APK.
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Сборка и публикация APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: MotionCalm
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v4
+
+      - name: Установить JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Прочитать версию и проверить номер сборки
+        run: |
+          set -euo pipefail
+          VERSION_NAME=$(sed -n 's/^versionName=//p' version.properties | tr -d '\r')
+          VERSION_CODE=$(sed -n 's/^versionCode=//p' version.properties | tr -d '\r')
+          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+            echo "::error::versionCode в MotionCalm/version.properties должен быть целым числом"
+            exit 1
+          fi
+          TAG="v${VERSION_NAME}-build${VERSION_CODE}"
+
+          {
+            echo "VERSION_NAME=$VERSION_NAME"
+            echo "VERSION_CODE=$VERSION_CODE"
+            echo "RELEASE_TAG=$TAG"
+            echo "SKIP_PUBLISH=false"
+          } >> "$GITHUB_ENV"
+
+          # Тот же номер уже опубликован. Если код внутри MotionCalm/ совпадает, это повтор
+          # (например, слияние в main): пропускаем сборку. Если код другой, это ошибка версии.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            git fetch --quiet --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG" || true
+            OLD_TREE=$(git rev-parse --verify --quiet "$TAG^{commit}:MotionCalm" || true)
+            NEW_TREE=$(git rev-parse --verify --quiet "HEAD:MotionCalm" || true)
+            if [ -n "$OLD_TREE" ] && [ "$OLD_TREE" = "$NEW_TREE" ]; then
+              echo "Сборка $TAG уже опубликована для этого же кода. Публикация пропущена."
+              echo "SKIP_PUBLISH=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::Релиз $TAG уже существует, но код отличается. Увеличьте versionCode в MotionCalm/version.properties."
+            exit 1
+          fi
+
+          # Для новой сборки номер должен быть больше всех уже опубликованных.
+          HIGHEST=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" --jq '.[].tag_name' \
+            | sed -n 's/.*-build\([0-9]*\)$/\1/p' | sort -n | tail -n 1)
+          HIGHEST=${HIGHEST:-0}
+          if [ "$VERSION_CODE" -le "$HIGHEST" ]; then
+            echo "::error::versionCode $VERSION_CODE не больше уже опубликованной сборки $HIGHEST. Увеличьте versionCode в MotionCalm/version.properties."
+            exit 1
+          fi
+
+      - name: Тесты и проверка кода (lint)
+        if: env.SKIP_PUBLISH != 'true'
+        run: sh ./gradlew --no-daemon --console=plain testReleaseUnitTest lintRelease
+
+      - name: Собрать APK, подписанный постоянным ключом
+        if: env.SKIP_PUBLISH != 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Не заданы секреты подписи (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD). Без постоянного ключа APK не публикуется."
+            exit 1
+          fi
+          KEYSTORE="$RUNNER_TEMP/release-key.p12"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+          chmod 600 "$KEYSTORE"
+          RELEASE_KEYSTORE="$KEYSTORE" \
+          RELEASE_KEYSTORE_TYPE=pkcs12 \
+          RELEASE_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD" \
+          RELEASE_KEY_ALIAS="$KEY_ALIAS" \
+          RELEASE_KEY_PASSWORD="$KEY_PASSWORD" \
+            sh ./gradlew --no-daemon --console=plain assembleRelease
+
+      - name: Проверить подпись, версию и сертификат APK
+        if: env.SKIP_PUBLISH != 'true'
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          "$BT/apksigner" verify --verbose "$APK"
+
+          CERT=$("$BT/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          EXPECTED=$(tr -d ' \r\n' < release-cert-sha256.txt)
+          if [ "$CERT" != "$EXPECTED" ]; then
+            echo "::error::APK подписан не тем ключом: SHA-256 $CERT, ожидался $EXPECTED. Релиз не публикуется."
+            exit 1
+          fi
+          echo "$CERT" > "$RUNNER_TEMP/cert.sha256"
+
+          BADGING=$("$BT/aapt2" dump badging "$APK")
+          sed -n '1p' <<< "$BADGING"
+          grep -q "versionCode='${VERSION_CODE}'" <<< "$BADGING" \
+            || { echo "::error::versionCode в APK не совпадает с version.properties"; exit 1; }
+          grep -q "versionName='${VERSION_NAME}'" <<< "$BADGING" \
+            || { echo "::error::versionName в APK не совпадает с version.properties"; exit 1; }
+
+      - name: Подготовить APK и примечания к релизу
+        if: env.SKIP_PUBLISH != 'true'
+        run: |
+          set -euo pipefail
+          APK_NAME="MotionCalm-${VERSION_NAME}-build${VERSION_CODE}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/$APK_NAME"
+          SHA=$(sha256sum "$RUNNER_TEMP/$APK_NAME" | cut -d' ' -f1)
+          python3 "$GITHUB_WORKSPACE/.github/scripts/release_notes.py" "$VERSION_CODE" CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          {
+            echo ""
+            echo "---"
+            echo "SHA-256 файла APK: \`$SHA\`"
+            echo "SHA-256 сертификата подписи: \`$(cat "$RUNNER_TEMP/cert.sha256")\`"
+          } >> "$RUNNER_TEMP/notes.md"
+          {
+            echo "APK_NAME=$APK_NAME"
+            echo "APK_PATH=$RUNNER_TEMP/$APK_NAME"
+          } >> "$GITHUB_ENV"
+
+      - name: Сохранить APK в артефактах запуска
+        if: env.SKIP_PUBLISH != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
+
+      - name: Опубликовать релиз на GitHub
+        if: env.SKIP_PUBLISH != 'true'
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" "$APK_PATH" \
+            --target "$GITHUB_SHA" \
+            --title "MotionCalm ${VERSION_NAME} (сборка ${VERSION_CODE})" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+
+      - name: Итог запуска
+        if: success() && env.SKIP_PUBLISH != 'true'
+        run: |
+          {
+            echo "### MotionCalm ${VERSION_NAME} (сборка ${VERSION_CODE})"
+            echo "- Релиз: ${RELEASE_TAG}"
+            echo "- APK: ${APK_NAME}"
+            echo "- SHA-256 сертификата подписи: $(cat "$RUNNER_TEMP/cert.sha256")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Удалить временный файл ключа
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release-key.p12"
+
+      - name: Сохранить отчёты сборки при ошибке
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports-${{ github.run_number }}
+          path: |
+            MotionCalm/app/build/reports
+            MotionCalm/app/build/test-results
+          if-no-files-found: ignore
