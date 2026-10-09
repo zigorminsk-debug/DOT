@@ -111,9 +111,13 @@ jobs:
               issues = ET.parse(lint).getroot().findall('issue')
               counts = Counter(i.get('severity') for i in issues)
               print(f"::notice title=Lint::Ошибок: {counts.get('Error', 0)}, предупреждений: {counts.get('Warning', 0)}")
+              shown = 0
               for i in issues:
                   if i.get('severity') == 'Error':
                       print(f"::error title=Lint {i.get('id')}::{i.get('message')}")
+                  elif i.get('severity') == 'Warning' and shown < 20:
+                      shown += 1
+                      print(f"::warning title=Lint {i.get('id')}::{i.get('message')}")
           else:
               print("::warning title=Lint::Отчёт lint не найден")
           PY
