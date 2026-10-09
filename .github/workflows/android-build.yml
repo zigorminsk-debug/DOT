@@ -153,15 +153,21 @@ jobs:
           set -euo pipefail
           APK=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
-          "$BT/apksigner" verify --verbose "$APK"
-
-          CERT=$("$BT/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr 'A-F' 'a-f')
+          VERIFY_OUT=$("$BT/apksigner" verify --verbose --print-certs "$APK")
+          echo "$VERIFY_OUT"
+          # Первая строка с отпечатком SHA-256 (формат строки у разных версий apksigner различается)
+          CERT=$(printf '%s\n' "$VERIFY_OUT" | awk '/certificate SHA-256 digest/ && !done { print $NF; done = 1 }' | tr 'A-F' 'a-f')
           EXPECTED=$(tr -d ' \r\n' < release-cert-sha256.txt | tr 'A-F' 'a-f')
+          if [ -z "$CERT" ]; then
+            echo "::error::apksigner не показал SHA-256 сертификата подписи"
+            exit 1
+          fi
           if [ "$CERT" != "$EXPECTED" ]; then
             echo "::error::APK подписан не тем ключом: SHA-256 $CERT, ожидался $EXPECTED. Релиз не публикуется."
             exit 1
           fi
           echo "$CERT" > "$RUNNER_TEMP/cert.sha256"
+          echo "::notice title=Подпись APK::SHA-256 сертификата совпадает с закреплённым: $CERT"
 
           BADGING=$("$BT/aapt2" dump badging "$APK")
           sed -n '1p' <<< "$BADGING"
