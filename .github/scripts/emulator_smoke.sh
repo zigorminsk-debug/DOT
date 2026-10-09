@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Проверка на эмуляторе Android: служба подсказок продолжает работать после выключения
-# и включения экрана. Так проверяется сценарий «разблокировал телефон, подсказки должны ожить».
+# Проверка на эмуляторе Android: при выключенном экране служба подсказок спит, а при включении просыпается.
+# Так проверяется сценарий «разблокировал телефон, подсказки должны ожить» и «при выключенном экране подсказки не тратят батарею».
 #
 # Использование: emulator_smoke.sh <путь_к_apk>
 # Итог печатается аннотациями GitHub (::notice / ::error), их видно на странице запуска и через API.
@@ -195,28 +195,32 @@ sleep 4
 W0=$(cpu_ticks)
 sleep 20
 W1=$(cpu_ticks)
-notice "Работа, экран включён, 20 с: процессор ${W0:-?} -> ${W1:-?} тиков"
-notice "Работа: датчики в dumpsys sensorservice $(adb shell dumpsys sensorservice 2>/dev/null | grep -c "$PKG")"
+notice "Работа, экран включён, 20 с: процессор ${W0:-?} -> ${W1:-?} тиков (для сравнения)"
 
 echo "Выключаем экран"
+adb logcat -c
 adb shell input keyevent 223                      # SLEEP
 sleep 6
 STATE=$(power_state)
 [ "$STATE" = "Asleep" ] || fail "экран не выключился, состояние: $STATE"
-sleep 6
+SLEEP_LOG=$(adb logcat -d -s MotionCue:I)
+grep -q "экран выключен: сплю" <<< "$SLEEP_LOG" || fail "служба не заметила выключение экрана"
+grep -q "окно с точками убрано" <<< "$SLEEP_LOG" || fail "при выключенном экране окно с точками не убрано"
 service_alive || fail "служба погибла, пока экран выключен"
 
+# Во сне подсказки спят: датчик отписан (даже сильные показания до службы не доходят),
+# кадров, сторожа и записей в журнале нет, процессор почти не работает. Проверяем 20 секунд.
 S0=$(cpu_ticks)
+emu_accel "2.5:9.81:-2.5"
 sleep 20
+emu_accel "0:9.81:0"
 S1=$(cpu_ticks)
-notice "Сон, экран выключен, 20 с: процессор ${S0:-?} -> ${S1:-?} тиков"
-notice "Во сне в системе: датчики $(adb shell dumpsys sensorservice 2>/dev/null | grep -c "$PKG"), блокировки $(adb shell dumpsys power 2>/dev/null | grep -c "$PKG"), будильники $(adb shell dumpsys alarm 2>/dev/null | grep -c "$PKG")"
-# Что система помнит о датчиках приложения во сне: строки dumpsys с именем пакета и их контекст
-SENS_LINES=$(adb shell dumpsys sensorservice 2>/dev/null | tr -d '\r' | grep -n -B2 "$PKG" | cut -c1-150 | head -n 30 | tr '\n' '|')
-notice "Во сне, dumpsys sensorservice, строки с приложением (1): ${SENS_LINES:0:850}"
-notice "Во сне, dumpsys sensorservice, строки с приложением (2): ${SENS_LINES:850:850}"
-SENS_ACTIVE=$(adb shell dumpsys sensorservice 2>/dev/null | tr -d '\r' | grep -n -i "active" | cut -c1-150 | head -n 12 | tr '\n' '|')
-notice "Во сне, dumpsys sensorservice, строки про активность (до 12): ${SENS_ACTIVE:0:850}"
+SLEEP_LOG=$(adb logcat -d -s MotionCue:I)
+AFTER_SLEEP=$(sed -n '/экран выключен: сплю/,$p' <<< "$SLEEP_LOG")
+[ "$(grep -c -E ' motion |heartbeat' <<< "$AFTER_SLEEP")" -eq 0 ] || fail "во сне служба продолжает писать motion или heartbeat"
+[[ "$S0" =~ ^[0-9]+$ && "$S1" =~ ^[0-9]+$ ]] || fail "не удалось измерить процессор во сне"
+[ $(( S1 - S0 )) -le 20 ] || fail "во сне приложение тратит процессор: $S0 -> $S1 тиков за 20 с"
+notice "Сон, экран выключен, 20 с: процессор $S0 -> $S1 тиков (порог 20)"
 
 echo "Включаем экран, как после разблокировки"
 adb logcat -c
@@ -230,6 +234,14 @@ service_alive || fail "служба погибла после включения
 
 LOG=$(adb logcat -d -s MotionCue:I)
 grep -q "экран включён" <<< "$LOG" || fail "служба не заметила включение экрана"
+SLEPT=$(sed -n 's/.*событий за сон=\([0-9-]*\).*/\1/p' <<< "$LOG" | head -n 1)
+[ "$SLEPT" = "0" ] || fail "во сне датчик прислал событий: ${SLEPT:-нет записи о сне}"
+grep -q "окно с точками показано" <<< "$LOG" || fail "после включения экрана окно с точками не показано"
+notice "Проснулись: за время сна датчик прислал $SLEPT событий, окно показано"
+
+# Экран диагностики не подписывается на датчик: в dumpsys sensorservice нет его записей
+APP_REG=$(adb shell dumpsys sensorservice 2>/dev/null | tr -d '\r' | grep -c 'motioncalm.MainActivity')
+[ "$APP_REG" -eq 0 ] || fail "экран диагностики подписан на датчик: записей в dumpsys $APP_REG"
 
 HB=$(heartbeats)
 N=$(grep -c heartbeat <<< "$HB")

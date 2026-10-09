@@ -34,10 +34,11 @@ import java.util.Locale;
  * Фоновый сервис: показывает DotsView поверх всех приложений
  * и обновляет смещение точек по данным датчиков.
  *
- * Датчики и цикл кадров работают только при включённом экране. Когда экран выключают,
- * они останавливаются. Когда экран включают или телефон разблокируют, запускаются снова.
- * Пока экран включён, сторож раз в секунду проверяет датчики, кадры и окно и чинит их,
- * если они замолчали.
+ * Работа только при включённом экране. Когда экран выключают, служба засыпает: датчик
+ * отписывается, кадры, сторож и тест останавливаются, окно с точками убирается. Процесс остаётся
+ * как foreground-служба: без него Android не сообщит о включении экрана. Когда экран включают,
+ * служба просыпается и снова подписывается на датчик. Пока экран включён, сторож раз в секунду
+ * проверяет датчики, кадры и окно и чинит их, если они замолчали.
  *
  * Ускорение берём из сырого акселерометра, а силу тяжести отделяем через GravityTracker.
  * Так разгон и торможение не «уходят» в наклон, как это бывает у системного линейного датчика.
@@ -126,6 +127,8 @@ public class MotionCueService extends Service implements SensorEventListener {
     private long lastFrameNs = 0;
 
     private boolean screenOn = true;
+    /** Значение debugEvents в момент засыпания: по разнице видно, слушал ли датчик во сне. */
+    private int eventsAtSleep = 0;
     private boolean receiverRegistered = false;
     private boolean sensorSubscribed = false;
     private boolean frameLoopScheduled = false;
@@ -219,8 +222,10 @@ public class MotionCueService extends Service implements SensorEventListener {
         accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY);
 
+        createNotificationChannel();
         screenOn = powerManager.isInteractive();
         debugScreenOn = screenOn;
+        eventsAtSleep = debugEvents;
         registerScreenReceiver();
         running = true;
         Log.i(TAG, "служба создана, экран " + (screenOn ? "включён" : "выключен"));
@@ -254,11 +259,13 @@ public class MotionCueService extends Service implements SensorEventListener {
             intensity = prefs.getInt(KEY_INTENSITY, 50);
         }
 
-        if (dotsView == null && !addOverlay()) {
-            stopCue();
-            return START_NOT_STICKY;
-        }
+        // Окно создаём сразу, а показываем только при включённом экране
+        ensureView();
         if (screenOn) {
+            if (!showOverlay()) {
+                stopCue();
+                return START_NOT_STICKY;
+            }
             resumeCue();
             scheduleWatchdog();
         }
@@ -292,7 +299,7 @@ public class MotionCueService extends Service implements SensorEventListener {
         dotSizeDp = thickness;
         dotsView.setDotSize(dotSizeDp);
 
-        if (test && !testing) {
+        if (test && !testing && screenOn) {
             testing = true;
             testStart = SystemClock.uptimeMillis();
             handler.post(testTick);
@@ -314,15 +321,18 @@ public class MotionCueService extends Service implements SensorEventListener {
         }
     }
 
-    /** Добавляет окно с точками. false — если система не позволила его добавить. */
-    private boolean addOverlay() {
-        DotsView view = new DotsView(this);
+    /** Создаёт окно с точками, но не показывает его: показ зависит от экрана. */
+    private void ensureView() {
+        if (dotsView != null) {
+            return;
+        }
+        dotsView = new DotsView(this);
 
         int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                 : WindowManager.LayoutParams.TYPE_PHONE;
 
-        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+        overlayParams = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
                 type,
@@ -331,35 +341,42 @@ public class MotionCueService extends Service implements SensorEventListener {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
-        lp.setTitle("MotionCalm");
-
-        try {
-            windowManager.addView(view, lp);
-        } catch (RuntimeException e) {
-            // Например, разрешение «поверх других окон» отозвали прямо перед запуском.
-            Log.w(TAG, "окно не добавилось: " + e);
-            return false;
-        }
-        dotsView = view;
-        overlayParams = lp;
-        debugOverlayAdded = true;
-        lastFrameNs = 0;
-        return true;
+        overlayParams.setTitle("MotionCalm");
     }
 
-    /** Возвращает окно, если система его убрала. false — окно вернуть не удалось. */
-    private boolean ensureOverlayAttached() {
-        if (dotsView == null || dotsView.isAttachedToWindow()) {
+    /** Показывает окно с точками, если оно ещё не показано. false — система не позволила его добавить. */
+    private boolean showOverlay() {
+        if (dotsView == null) {
+            return false;
+        }
+        if (dotsView.isAttachedToWindow()) {
             return true;
         }
         try {
             windowManager.addView(dotsView, overlayParams);
-            debugOverlayAdded = true;
-            return true;
         } catch (RuntimeException e) {
-            Log.w(TAG, "окно не вернулось: " + e);
+            // Например, разрешение «поверх других окон» отозвали прямо перед показом.
+            Log.w(TAG, "окно не добавилось: " + e);
             return false;
         }
+        debugOverlayAdded = true;
+        lastFrameNs = 0;
+        Log.i(TAG, "окно с точками показано");
+        return true;
+    }
+
+    /** Убирает окно с точками: во сне его не держим. */
+    private void hideOverlay() {
+        debugOverlayAdded = false;
+        if (dotsView == null || !dotsView.isAttachedToWindow()) {
+            return;
+        }
+        try {
+            windowManager.removeView(dotsView);
+        } catch (IllegalArgumentException ignored) {
+            // окно уже удалено системой
+        }
+        Log.i(TAG, "окно с точками убрано");
     }
 
     /** Датчики и цикл кадров при включённом экране. Безопасно вызывать многократно. */
@@ -371,27 +388,39 @@ public class MotionCueService extends Service implements SensorEventListener {
         startFrameLoop();
     }
 
+    /** Засыпаем: всё, что работает при включённом экране, останавливаем. Процесс и уведомление остаются. */
     private void onScreenOff() {
+        if (!screenOn) {
+            return;
+        }
         screenOn = false;
         debugScreenOn = false;
-        Log.i(TAG, "экран выключен: останавливаю датчики, кадры и сторож");
+        eventsAtSleep = debugEvents;
+        stopTest();
         handler.removeCallbacks(watchdog);
         unsubscribeSensor();
         stopFrameLoop();
+        hideOverlay();
+        updateNotification();
+        Log.i(TAG, "экран выключен: сплю, датчик отключён, кадры остановлены, событий=" + debugEvents);
     }
 
+    /** Просыпаемся: показываем окно и снова подписываемся на датчик. */
     private void onScreenOn() {
+        if (screenOn) {
+            return;   // экран и так включён, например при разблокировке
+        }
         screenOn = true;
         debugScreenOn = true;
+        Log.i(TAG, "экран включён: просыпаюсь, событий за сон=" + (debugEvents - eventsAtSleep));
+        updateNotification();
         if (dotsView == null) {
-            return;   // окно ещё не показано: при старте всё запустится само
+            return;   // окно ещё не создано: при старте всё запустится само
         }
-        Log.i(TAG, "экран включён: возобновляю датчики и кадры");
         // Точки начинают с покоя, а не с последнего значения до выключения экрана.
         targetUx = 0f;
         targetUy = 0f;
-        lastFrameNs = 0;
-        if (!ensureOverlayAttached()) {
+        if (!showOverlay()) {
             stopCue();
             return;
         }
@@ -446,6 +475,12 @@ public class MotionCueService extends Service implements SensorEventListener {
         frameLoopScheduled = false;
     }
 
+    /** Останавливает имитацию движения, если она идёт. */
+    private void stopTest() {
+        testing = false;
+        handler.removeCallbacks(testTick);
+    }
+
     private void scheduleWatchdog() {
         handler.removeCallbacks(watchdog);
         handler.postDelayed(watchdog, WATCHDOG_PERIOD_MS);
@@ -457,7 +492,7 @@ public class MotionCueService extends Service implements SensorEventListener {
 
         if (dotsView != null && !dotsView.isAttachedToWindow()) {
             Log.w(TAG, "окно с точками пропало, возвращаю");
-            if (!ensureOverlayAttached()) {
+            if (!showOverlay()) {
                 stopCue();
                 return;
             }
@@ -526,13 +561,21 @@ public class MotionCueService extends Service implements SensorEventListener {
     }
 
     private void startAsForeground() {
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW);
-            nm.createNotificationChannel(channel);
+        Notification notification = buildNotification();
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIF_ID, notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else {
+            startForeground(NOTIF_ID, notification);
         }
+    }
 
+    /** Обновляет текст уведомления: подсказки работают или спят. */
+    private void updateNotification() {
+        getSystemService(NotificationManager.class).notify(NOTIF_ID, buildNotification());
+    }
+
+    private Notification buildNotification() {
         Intent stopIntent = new Intent(this, MotionCueService.class).setAction(ACTION_STOP);
         PendingIntent stopPi = PendingIntent.getService(this, 0, stopIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
@@ -542,17 +585,18 @@ public class MotionCueService extends Service implements SensorEventListener {
                 : new Notification.Builder(this);
         builder.setSmallIcon(R.drawable.ic_notif)
                 .setContentTitle(getString(R.string.app_name))
-                .setContentText(getString(R.string.notif_text))
+                .setContentText(getString(screenOn ? R.string.notif_text : R.string.notif_text_sleep))
                 .setOngoing(true)
                 .addAction(0, getString(R.string.notif_stop), stopPi);
+        return builder.build();
+    }
 
-        Notification notification = builder.build();
-
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, notification,
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else {
-            startForeground(NOTIF_ID, notification);
+    /** Канал уведомления создаём один раз, до первого уведомления. */
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW);
+            getSystemService(NotificationManager.class).createNotificationChannel(channel);
         }
     }
 
@@ -610,8 +654,7 @@ public class MotionCueService extends Service implements SensorEventListener {
     @Override
     public void onDestroy() {
         running = false;
-        testing = false;
-        handler.removeCallbacks(testTick);
+        stopTest();
         handler.removeCallbacks(watchdog);
         unsubscribeSensor();
         stopFrameLoop();
@@ -623,15 +666,8 @@ public class MotionCueService extends Service implements SensorEventListener {
             }
             receiverRegistered = false;
         }
-        if (dotsView != null) {
-            try {
-                windowManager.removeView(dotsView);
-            } catch (IllegalArgumentException ignored) {
-                // окно уже удалено
-            }
-            dotsView = null;
-        }
-        debugOverlayAdded = false;
+        hideOverlay();
+        dotsView = null;
         stopForeground(STOP_FOREGROUND_REMOVE);
         requestTileRefresh();
         Log.i(TAG, "служба остановлена");

@@ -7,14 +7,13 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
-import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
@@ -28,12 +27,14 @@ import android.widget.TextView;
 import java.io.File;
 import java.util.Locale;
 
-public class MainActivity extends Activity implements SensorEventListener {
+public class MainActivity extends Activity {
 
     /** Сколько символов примечаний к релизу показывать в статусе обновления. */
     private static final int MAX_NOTES_CHARS = 800;
     /** Диагностика обновляется не чаще, чем раз в эту паузу: частые обновления дают «дрожание» текста. */
     private static final long DEBUG_PERIOD_MS = 250;
+    /** Когда подсказки выключены, диагностика обновляется реже: датчика нет, менять нечего. */
+    private static final long DEBUG_IDLE_PERIOD_MS = 1000;
     /** Самая тонкая точка, dp. Ползунок толщины начинается с этого значения и заканчивается на 12 dp. */
     private static final int MIN_THICKNESS_DP = 4;
 
@@ -62,7 +63,15 @@ public class MainActivity extends Activity implements SensorEventListener {
 
     private SharedPreferences prefs;
     private boolean updatingUi = false;
-    private long lastDebugUpdateMs = 0;
+    /** Таймер диагностики: работает, пока приложение открыто. Датчик на экране не подписываем. */
+    private final Handler diagHandler = new Handler(Looper.getMainLooper());
+    private final Runnable diagTick = new Runnable() {
+        @Override
+        public void run() {
+            refreshDiagnostics();
+            scheduleDiagnostics();
+        }
+    };
 
     /** Сборка, найденная последней проверкой. null — устанавливать пока нечего. */
     private ReleaseInfo pendingRelease;
@@ -251,28 +260,22 @@ public class MainActivity extends Activity implements SensorEventListener {
         setSwitchSilently(MotionCueService.running);
         updateStatus();
         updateBatteryStatus();
-        if (sensor != null) {
-            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI);
-        }
+        refreshDiagnostics();
+        scheduleDiagnostics();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        sensorManager.unregisterListener(this);
+        diagHandler.removeCallbacks(diagTick);
     }
 
     /**
-     * Диагностика под ползунками. Обновляется не чаще четырёх раз в секунду, а все числа
-     * выведены фиксированной ширины, поэтому текст не дрожит и не сдвигает кнопки ниже.
+     * Диагностика под ползунками. Обновляется четыре раза в секунду, пока работают подсказки,
+     * и раз в секунду, когда они выключены. Все числа выведены фиксированной ширины,
+     * поэтому текст не дрожит и не сдвигает кнопки ниже.
      */
-    @Override
-    public void onSensorChanged(SensorEvent event) {
-        long nowMs = SystemClock.elapsedRealtime();
-        if (nowMs - lastDebugUpdateMs < DEBUG_PERIOD_MS) {
-            return;
-        }
-        lastDebugUpdateMs = nowMs;
+    private void refreshDiagnostics() {
         long nowNs = System.nanoTime();
         // Ускорение автомобиля, которое реально используют точки (без силы тяжести)
         float x = MotionCueService.debugAx;
@@ -300,8 +303,11 @@ public class MainActivity extends Activity implements SensorEventListener {
                 MotionCueService.debugUx, MotionCueService.debugUy));
     }
 
-    @Override
-    public void onAccuracyChanged(Sensor s, int accuracy) {
+    /** Следующее обновление диагностики: быстрее, когда подсказки работают. */
+    private void scheduleDiagnostics() {
+        diagHandler.removeCallbacks(diagTick);
+        diagHandler.postDelayed(diagTick,
+                MotionCueService.running ? DEBUG_PERIOD_MS : DEBUG_IDLE_PERIOD_MS);
     }
 
     /** Возраст последнего события фиксированной ширины: «  0.3 с назад» или «    — с назад». */
