@@ -16,7 +16,8 @@ notice() {
 }
 
 fail() {
-    echo "::error title=Эмулятор::$1"
+    # Аннотация одной строкой: иначе GitHub покажет только первую строку сообщения
+    echo "::error title=Эмулятор::$(printf '%s' "$1" | tr '\n' ' ' | tr -s ' ')"
     echo "ОШИБКА: $1"
     echo "--- последние записи службы:"
     adb logcat -d -s MotionCue:I | tail -n 15
@@ -56,6 +57,10 @@ grep -q "Success" <<< "$INSTALL_OUT" || fail "APK не установился"
 adb shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow
 
 echo "Запускаем службу подсказок"
+# Служба переднего плана с Android 12 не запускается из фона. Поэтому сначала открываем
+# приложение (оно становится видимым), и уже потом запускаем службу.
+adb shell am start -n "$PKG/.MainActivity" > /dev/null 2>&1
+sleep 3
 adb logcat -c
 START_OUT=$(adb shell am start-foreground-service -n "$SVC" -a com.example.motioncalm.START 2>&1)
 echo "$START_OUT"
