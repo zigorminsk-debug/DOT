@@ -196,6 +196,7 @@ W0=$(cpu_ticks)
 sleep 20
 W1=$(cpu_ticks)
 notice "Работа, экран включён, 20 с: процессор ${W0:-?} -> ${W1:-?} тиков"
+notice "Работа: датчики в dumpsys sensorservice $(adb shell dumpsys sensorservice 2>/dev/null | grep -c "$PKG")"
 
 echo "Выключаем экран"
 adb shell input keyevent 223                      # SLEEP
@@ -210,6 +211,12 @@ sleep 20
 S1=$(cpu_ticks)
 notice "Сон, экран выключен, 20 с: процессор ${S0:-?} -> ${S1:-?} тиков"
 notice "Во сне в системе: датчики $(adb shell dumpsys sensorservice 2>/dev/null | grep -c "$PKG"), блокировки $(adb shell dumpsys power 2>/dev/null | grep -c "$PKG"), будильники $(adb shell dumpsys alarm 2>/dev/null | grep -c "$PKG")"
+# Что система помнит о датчиках приложения во сне: строки dumpsys с именем пакета и их контекст
+SENS_LINES=$(adb shell dumpsys sensorservice 2>/dev/null | tr -d '\r' | grep -n -B2 "$PKG" | cut -c1-150 | head -n 30 | tr '\n' '|')
+notice "Во сне, dumpsys sensorservice, строки с приложением (1): ${SENS_LINES:0:850}"
+notice "Во сне, dumpsys sensorservice, строки с приложением (2): ${SENS_LINES:850:850}"
+SENS_ACTIVE=$(adb shell dumpsys sensorservice 2>/dev/null | tr -d '\r' | grep -n -i "active" | cut -c1-150 | head -n 12 | tr '\n' '|')
+notice "Во сне, dumpsys sensorservice, строки про активность (до 12): ${SENS_ACTIVE:0:850}"
 
 echo "Включаем экран, как после разблокировки"
 adb logcat -c
