@@ -34,7 +34,7 @@ public class MainActivity extends Activity implements SensorEventListener {
     private static final int MAX_NOTES_CHARS = 800;
     /** Диагностика обновляется не чаще, чем раз в эту паузу: частые обновления дают «дрожание» текста. */
     private static final long DEBUG_PERIOD_MS = 250;
-    /** Самая тонкая точка, dp. Ползунок толщины показывает значения от этой величины. */
+    /** Самая тонкая точка, dp. Ползунок толщины начинается с этого значения и заканчивается на 12 dp. */
     private static final int MIN_THICKNESS_DP = 4;
 
     private Switch switchCue;
@@ -122,7 +122,8 @@ public class MainActivity extends Activity implements SensorEventListener {
         });
 
         int thickness = prefs.getInt(MotionCueService.KEY_THICKNESS, MotionCueService.DEFAULT_THICKNESS);
-        seekThickness.setProgress(Math.max(0, thickness - MIN_THICKNESS_DP));
+        // Старые настройки могли сохранить толщину больше максимума: ограничиваем, чтобы точки не выходили к тексту
+        seekThickness.setProgress(Math.max(0, Math.min(seekThickness.getMax(), thickness - MIN_THICKNESS_DP)));
         updateThicknessLabel();
         seekThickness.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override

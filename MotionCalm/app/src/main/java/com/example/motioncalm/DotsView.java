@@ -10,31 +10,37 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Точки по левому и правому краю экрана, как «Признаки движения» на iPhone.
- * Точки ведут себя как объекты с инерцией: при ускорении они смещаются
- * в противоположную сторону, затем плавно возвращаются на место.
- * При равномерном движении стоят на месте.
+ * Точки у левого и правого края экрана, как «Признаки движения» на iPhone.
+ * Точки ведут себя как объекты с инерцией: при ускорении смещаются в противоположную сторону,
+ * затем плавно возвращаются на место.
+ *
+ * Чтобы точки не перекрывали текст, смещение вбок ограничено полосой у края (см. DotLayout).
+ * Вверх и вниз точки смещаются вдоль края, где текста обычно нет, и ограничены только экраном.
  */
 public class DotsView extends View {
 
     /** Количество точек на каждый край: Мало / Средне / Много. */
     public static final int[] COUNTS = {5, 8, 12};
 
-    private static final float MARGIN_DP = 14f;    // отступ от края
-    private static final float MIN_DIAMETER_DP = 2f;
-    private static final float MAX_DIAMETER_DP = 24f;
+    private static final float VERTICAL_MARGIN_DP = 14f;   // отступ сверху и снизу
+    private static final float MIN_DIAMETER_DP = 4f;
+    /** Больше 12 dp точка с ореолом не помещается в полосу у края. */
+    private static final float MAX_DIAMETER_DP = 12f;
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final float density;
 
+    /** Точки в покое: {x, y, сторона}. Сторона −1 — левый край, +1 — правый. Координаты в пикселях. */
     private final List<float[]> base = new ArrayList<>();
     private int dotCount = COUNTS[1];
     private float intensity = 0.5f;
     private float radiusDp = 4f;   // радиус точки в dp (диаметр 8 dp)
 
     private final DotPhysics physics = new DotPhysics();
-    private float px, py;   // текущее смещение, пиксели
+    private float offsetLeftPx = 0f;    // смещение левых точек по горизонтали, пиксели
+    private float offsetRightPx = 0f;   // смещение правых точек по горизонтали, пиксели
+    private float offsetYPx = 0f;       // смещение по вертикали, пиксели
 
     public DotsView(Context context) {
         super(context);
@@ -49,10 +55,11 @@ public class DotsView extends View {
         invalidate();
     }
 
-    /** Толщина точки (диаметр), dp. Ограничена разумными пределами. */
+    /** Толщина точки (диаметр), dp. Ограничена полосой у края. */
     public void setDotSize(float diameterDp) {
         float clamped = Math.max(MIN_DIAMETER_DP, Math.min(MAX_DIAMETER_DP, diameterDp));
         radiusDp = clamped / 2f;
+        buildDots(getWidth(), getHeight());
         invalidate();
     }
 
@@ -73,23 +80,30 @@ public class DotsView extends View {
      */
     public void step(float ux, float uy, float dt) {
         physics.step(ux, uy, dt);
-        px = physics.offsetX() * density;
-        py = physics.offsetY() * density;
+        float ox = physics.offsetX();   // dp, без ограничения
+        float oy = physics.offsetY();
+        float inward = DotLayout.travelInDp(radiusDp);
+        float outward = DotLayout.travelOutDp();
+        // Левый край: смещение вправо — внутрь. Правый край: внутрь — это смещение влево.
+        offsetLeftPx = DotLayout.softLimit(ox, inward, outward) * density;
+        offsetRightPx = -DotLayout.softLimit(-ox, inward, outward) * density;
+        offsetYPx = oy * density;
         invalidate();
+    }
+
+    /** Смещение левых точек по горизонтали, dp (для диагностики). */
+    public float getOffsetXdp() {
+        return offsetLeftPx / density;
+    }
+
+    /** Смещение точек по вертикали, dp (для диагностики). */
+    public float getOffsetYdp() {
+        return offsetYPx / density;
     }
 
     /** Амплитуда: 0.3 (слабо) … 2.0 (сильно), 1.0 — стандарт. */
     public void setAmplitude(float value) {
         physics.setAmplitude(value);
-    }
-
-    /** Текущее смещение точек в dp (для диагностики). */
-    public float getOffsetXdp() {
-        return physics.offsetX();
-    }
-
-    public float getOffsetYdp() {
-        return physics.offsetY();
     }
 
     @Override
@@ -103,15 +117,15 @@ public class DotsView extends View {
         if (w <= 0 || h <= 0) {
             return;
         }
-        float m = MARGIN_DP * density;
-        float top = m;
-        float bottom = h - m;
+        float edge = DotLayout.restCenterDp(radiusDp) * density;
+        float top = VERTICAL_MARGIN_DP * density;
+        float bottom = h - top;
         float step = (bottom - top) / (dotCount - 1);
 
         for (int i = 0; i < dotCount; i++) {
             float y = top + i * step;
-            base.add(new float[]{m, y});       // левый край
-            base.add(new float[]{w - m, y});   // правый край
+            base.add(new float[]{edge, y, -1f});        // левый край
+            base.add(new float[]{w - edge, y, 1f});     // правый край
         }
     }
 
@@ -119,13 +133,14 @@ public class DotsView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         float r = radiusDp * density;
+        float haloR = DotLayout.HALO_DP * density;
         fill.setColor(Color.argb((int) (255 * intensity), 20, 20, 20));
         halo.setColor(Color.argb((int) (255 * intensity * 0.5f), 255, 255, 255));
 
         for (float[] p : base) {
-            float cx = p[0] + px;
-            float cy = p[1] + py;
-            canvas.drawCircle(cx, cy, r + 1.5f * density, halo);
+            float cx = p[0] + (p[2] < 0f ? offsetLeftPx : offsetRightPx);
+            float cy = p[1] + offsetYPx;
+            canvas.drawCircle(cx, cy, r + haloR, halo);
             canvas.drawCircle(cx, cy, r, fill);
         }
     }

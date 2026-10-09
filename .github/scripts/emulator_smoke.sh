@@ -78,6 +78,14 @@ done
 if [ -z "$BOUNDS" ]; then
     fail "переключатель подсказок не найден; видимые id: $(grep -o 'resource-id="[^"]*"' <<< "$XML" | head -n 8 | tr '\n' ' ')"
 fi
+# Текст приложения не должен заходить в полосу у края (16 dp): там точки, и они не должны перекрывать текст
+DENSITY=$(adb shell wm density | tr -d '\r' | sed -n 's/.*: *\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+GUTTER_PX=$(( 16 * ${DENSITY:-420} / 160 ))
+MIN_TEXT_X=$(grep -o 'text="[^"][^"]*"[^>]*bounds="\[[0-9]*,[0-9]*\]' <<< "$XML" | sed -n 's/.*bounds="\[\([0-9]*\),.*/\1/p' | sort -n | head -n 1)
+notice "левый край текста приложения: ${MIN_TEXT_X:-нет} px, полоса у края: $GUTTER_PX px"
+if [ -n "$MIN_TEXT_X" ] && [ "$MIN_TEXT_X" -lt "$GUTTER_PX" ]; then
+    fail "текст приложения заходит в полосу у края: $MIN_TEXT_X px < $GUTTER_PX px"
+fi
 read -r X1 Y1 X2 Y2 <<< "$(grep -o '[0-9]\+' <<< "$BOUNDS" | tr '\n' ' ')"
 adb shell input tap $(( (X1 + X2) / 2 )) $(( (Y1 + Y2) / 2 ))
 sleep 8

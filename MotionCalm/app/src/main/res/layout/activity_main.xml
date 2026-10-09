@@ -104,7 +104,7 @@
             android:id="@+id/seekThickness"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:max="16" />
+            android:max="8" />
 
         <Button
             android:id="@+id/btnTest"
