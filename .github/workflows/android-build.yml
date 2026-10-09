@@ -132,28 +132,20 @@ jobs:
             MotionCalm/app/build/test-results
           if-no-files-found: ignore
 
-      - name: Собрать APK, подписанный постоянным ключом
+      - name: Собрать APK, подписанный ключом из репозитория
         if: env.SKIP_PUBLISH != 'true'
         env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          # Ключ лежит в репозитории (.android/debug.keystore). Он совпадает с ключом
+          # MotionCalm-debug.apk, а его отпечаток проверяется в шаге ниже.
+          RELEASE_KEYSTORE: ${{ github.workspace }}/.android/debug.keystore
+          RELEASE_KEYSTORE_TYPE: pkcs12
+          RELEASE_KEYSTORE_PASSWORD: android
+          RELEASE_KEY_ALIAS: androiddebugkey
+          RELEASE_KEY_PASSWORD: android
         run: |
           set -euo pipefail
-          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
-            echo "::error::Не заданы секреты подписи (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD). Без постоянного ключа APK не публикуется."
-            exit 1
-          fi
-          KEYSTORE="$RUNNER_TEMP/release-key.p12"
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
-          chmod 600 "$KEYSTORE"
-          RELEASE_KEYSTORE="$KEYSTORE" \
-          RELEASE_KEYSTORE_TYPE=pkcs12 \
-          RELEASE_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD" \
-          RELEASE_KEY_ALIAS="$KEY_ALIAS" \
-          RELEASE_KEY_PASSWORD="$KEY_PASSWORD" \
-            sh ./gradlew --no-daemon --console=plain assembleRelease
+          test -f "$RELEASE_KEYSTORE" || { echo "::error::Не найден файл ключа $RELEASE_KEYSTORE"; exit 1; }
+          sh ./gradlew --no-daemon --console=plain assembleRelease
 
       - name: Проверить подпись, версию и сертификат APK
         if: env.SKIP_PUBLISH != 'true'
@@ -163,8 +155,8 @@ jobs:
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
           "$BT/apksigner" verify --verbose "$APK"
 
-          CERT=$("$BT/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
-          EXPECTED=$(tr -d ' \r\n' < release-cert-sha256.txt)
+          CERT=$("$BT/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr 'A-F' 'a-f')
+          EXPECTED=$(tr -d ' \r\n' < release-cert-sha256.txt | tr 'A-F' 'a-f')
           if [ "$CERT" != "$EXPECTED" ]; then
             echo "::error::APK подписан не тем ключом: SHA-256 $CERT, ожидался $EXPECTED. Релиз не публикуется."
             exit 1
@@ -223,8 +215,3 @@ jobs:
             echo "- APK: ${APK_NAME}"
             echo "- SHA-256 сертификата подписи: $(cat "$RUNNER_TEMP/cert.sha256")"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Удалить временный файл ключа
-        if: always()
-        run: rm -f "$RUNNER_TEMP/release-key.p12"
-
