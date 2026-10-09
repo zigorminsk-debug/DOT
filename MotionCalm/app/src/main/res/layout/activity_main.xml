@@ -93,6 +93,19 @@
             android:layout_height="wrap_content"
             android:max="100" />
 
+        <TextView
+            android:id="@+id/tvThickness"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:textSize="16sp" />
+
+        <SeekBar
+            android:id="@+id/seekThickness"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="16" />
+
         <Button
             android:id="@+id/btnTest"
             android:layout_width="match_parent"
@@ -113,7 +126,8 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
             android:fontFamily="monospace"
-            android:textSize="15sp" />
+            android:lines="8"
+            android:textSize="13sp" />
 
         <TextView
             android:layout_width="wrap_content"

@@ -26,16 +26,15 @@ import android.provider.Settings;
 import android.service.quicksettings.TileService;
 import android.util.Log;
 import android.view.Choreographer;
-import android.view.Surface;
 import android.view.WindowManager;
 
 /**
  * Фоновый сервис: показывает DotsView поверх всех приложений
- * и обновляет смещение точек по данным акселерометра.
+ * и обновляет смещение точек по данным датчиков.
  *
- * Датчик и цикл кадров работают только при включённом экране. Когда экран выключают,
+ * Датчики и цикл кадров работают только при включённом экране. Когда экран выключают,
  * они останавливаются. Когда экран включают или телефон разблокируют, запускаются снова.
- * Пока экран включён, сторож раз в секунду проверяет датчик, кадры и окно и чинит их,
+ * Пока экран включён, сторож раз в секунду проверяет датчики, кадры и окно и чинит их,
  * если они замолчали.
  */
 public class MotionCueService extends Service implements SensorEventListener {
@@ -46,16 +45,20 @@ public class MotionCueService extends Service implements SensorEventListener {
     public static final String EXTRA_INTENSITY = "intensity";
     public static final String EXTRA_DOTS = "dots";
     public static final String EXTRA_AMP = "amp";
+    public static final String EXTRA_THICKNESS = "thickness";
 
     static final String PREFS = "motioncalm";
     static final String KEY_INTENSITY = "intensity";
     static final String KEY_DOTS = "dots";
     static final String KEY_AMP = "amp";
+    static final String KEY_THICKNESS = "thickness";
+    /** Толщина точек по умолчанию, dp (диаметр). */
+    static final int DEFAULT_THICKNESS = 8;
 
     private static final String TAG = "MotionCue";
     private static final String CHANNEL_ID = "motioncalm";
     private static final int NOTIF_ID = 1;
-    private static final float GRAVITY_ALPHA = 0.9f;  // для фолбэка без linear-sensor
+    private static final float GRAVITY_ALPHA = 0.9f;  // низкочастотный фильтр для оценки силы тяжести
     private static final float SMOOTH_ALPHA = 0.25f;  // сглаживание ускорения
     private static final long SENSOR_STALE_NS = 300_000_000L; // 0.3 с без данных -> точки возвращаются
     private static final long TEST_DURATION_MS = 8000;
@@ -69,6 +72,10 @@ public class MotionCueService extends Service implements SensorEventListener {
     public static volatile int debugEvents = 0;
     public static volatile float debugUx = 0f;
     public static volatile float debugUy = 0f;
+    /** Ускорение автомобиля вперёд (+) и назад (-), м/с². */
+    public static volatile float debugForward = 0f;
+    /** Ускорение автомобиля вправо (+) и влево (-), м/с². */
+    public static volatile float debugLateral = 0f;
     public static volatile boolean debugOverlayAdded = false;
     public static volatile boolean debugScreenOn = true;
     public static volatile boolean debugSensorOn = false;
@@ -82,12 +89,26 @@ public class MotionCueService extends Service implements SensorEventListener {
     private WindowManager.LayoutParams overlayParams;
     private SensorManager sensorManager;
     private PowerManager powerManager;
-    private Sensor sensor;
-    private boolean hasLinearSensor;
     private DotsView dotsView;
 
-    private float gx, gy;   // оценка силы тяжести (фолбэк)
-    private float fx, fy;   // сглаженное ускорение в координатах устройства
+    /** Датчик линейного ускорения (без силы тяжести), если он есть. */
+    private Sensor linearSensor;
+    /** Обычный акселерометр: нужен, если нет линейного датчика или датчика гравитации. */
+    private Sensor accelSensor;
+    /** Датчик гравитации: даёт направление «вверх» относительно телефона. */
+    private Sensor gravitySensor;
+    /** Датчик, по которому ведётся сторож: линейный, а если его нет, акселерометр. */
+    private Sensor primarySensor;
+    private boolean hasGravitySensor;
+
+    /** Сила тяжести в координатах устройства, направлена вверх, м/с². */
+    private final float[] gravity = new float[3];
+    /** Низкочастотная оценка силы тяжести по акселерометру. */
+    private final float[] lowAccel = new float[3];
+    /** Сглаженное ускорение без силы тяжести, координаты устройства. */
+    private final float[] smooth = new float[3];
+
+    private int dotSizeDp = DEFAULT_THICKNESS;
 
     // Цель ускорения для физики точек. Датчик только обновляет цель,
     // а пересчёт делается на каждом кадре экрана (см. frameCallback).
@@ -168,7 +189,7 @@ public class MotionCueService extends Service implements SensorEventListener {
         }
     };
 
-    /** Сторож: пока экран включён, раз в секунду проверяет датчик, кадры и окно. */
+    /** Сторож: пока экран включён, раз в секунду проверяет датчики, кадры и окно. */
     private final Runnable watchdog = new Runnable() {
         @Override
         public void run() {
@@ -187,11 +208,12 @@ public class MotionCueService extends Service implements SensorEventListener {
         sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
         powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
 
-        sensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION);
-        hasLinearSensor = sensor != null;
-        if (!hasLinearSensor) {
-            sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        }
+        linearSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION);
+        accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY);
+        hasGravitySensor = gravitySensor != null;
+        primarySensor = linearSensor != null ? linearSensor : accelSensor;
+
         screenOn = powerManager.isInteractive();
         debugScreenOn = screenOn;
         registerScreenReceiver();
@@ -212,7 +234,7 @@ public class MotionCueService extends Service implements SensorEventListener {
 
         boolean test = intent != null && ACTION_TEST.equals(intent.getAction());
         // Для обычной работы нужен датчик; тест движения обходится без него.
-        if (!Settings.canDrawOverlays(this) || (sensor == null && !test)) {
+        if (!Settings.canDrawOverlays(this) || (primarySensor == null && !test)) {
             stopCue();
             return START_NOT_STICKY;
         }
@@ -253,6 +275,16 @@ public class MotionCueService extends Service implements SensorEventListener {
         }
         dotsView.setAmplitude(0.3f + 1.7f * amp / 100f);
         dotsView.setIntensity(0.1f + 0.9f * intensity / 100f);
+
+        int thickness;
+        if (intent != null && intent.hasExtra(EXTRA_THICKNESS)) {
+            thickness = intent.getIntExtra(EXTRA_THICKNESS, DEFAULT_THICKNESS);
+            prefs.edit().putInt(KEY_THICKNESS, thickness).apply();
+        } else {
+            thickness = prefs.getInt(KEY_THICKNESS, DEFAULT_THICKNESS);
+        }
+        dotSizeDp = thickness;
+        dotsView.setDotSize(dotSizeDp);
 
         if (test && !testing) {
             testing = true;
@@ -311,7 +343,7 @@ public class MotionCueService extends Service implements SensorEventListener {
         }
     }
 
-    /** Датчик и цикл кадров при включённом экране. Безопасно вызывать многократно. */
+    /** Датчики и цикл кадров при включённом экране. Безопасно вызывать многократно. */
     private void resumeCue() {
         if (dotsView == null) {
             return;
@@ -323,7 +355,7 @@ public class MotionCueService extends Service implements SensorEventListener {
     private void onScreenOff() {
         screenOn = false;
         debugScreenOn = false;
-        Log.i(TAG, "экран выключен: останавливаю датчик, кадры и сторож");
+        Log.i(TAG, "экран выключен: останавливаю датчики, кадры и сторож");
         handler.removeCallbacks(watchdog);
         unsubscribeSensor();
         stopFrameLoop();
@@ -335,7 +367,7 @@ public class MotionCueService extends Service implements SensorEventListener {
         if (dotsView == null) {
             return;   // окно ещё не показано: при старте всё запустится само
         }
-        Log.i(TAG, "экран включён: возобновляю датчик и кадры");
+        Log.i(TAG, "экран включён: возобновляю датчики и кадры");
         // Точки начинают с покоя, а не с последнего значения до выключения экрана.
         targetUx = 0f;
         targetUy = 0f;
@@ -348,11 +380,23 @@ public class MotionCueService extends Service implements SensorEventListener {
         scheduleWatchdog();
     }
 
+    /**
+     * Подписка на датчики. Основной датчик даёт ускорение. Датчик гравитации даёт направление «вверх».
+     * Акселерометр добавляется, если нет датчика гравитации (тогда гравитацию оцениваем сами).
+     */
     private void subscribeSensor() {
-        if (sensorSubscribed || sensor == null || dotsView == null) {
+        if (sensorSubscribed || primarySensor == null || dotsView == null) {
             return;
         }
-        sensorSubscribed = sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME);
+        sensorSubscribed = sensorManager.registerListener(this, primarySensor, SensorManager.SENSOR_DELAY_GAME);
+        if (sensorSubscribed) {
+            if (gravitySensor != null) {
+                sensorManager.registerListener(this, gravitySensor, SensorManager.SENSOR_DELAY_GAME);
+            }
+            if (primarySensor != accelSensor && !hasGravitySensor && accelSensor != null) {
+                sensorManager.registerListener(this, accelSensor, SensorManager.SENSOR_DELAY_GAME);
+            }
+        }
         debugSensorOn = sensorSubscribed;
         lastSensorNs = System.nanoTime();   // отсчёт тишины начинается заново
         if (!sensorSubscribed) {
@@ -364,7 +408,7 @@ public class MotionCueService extends Service implements SensorEventListener {
         if (!sensorSubscribed) {
             return;
         }
-        sensorManager.unregisterListener(this);
+        sensorManager.unregisterListener(this);   // снимает все датчики, на которые подписаны
         sensorSubscribed = false;
         debugSensorOn = false;
     }
@@ -400,7 +444,7 @@ public class MotionCueService extends Service implements SensorEventListener {
             }
         }
 
-        if (CueHealth.sensorNeedsSubscribe(screenOn, testing, sensor != null, sensorSubscribed,
+        if (CueHealth.sensorNeedsSubscribe(screenOn, testing, primarySensor != null, sensorSubscribed,
                 nowNs, lastSensorNs)) {
             if (sensorSubscribed) {
                 Log.w(TAG, "датчик молчит, переподписываюсь");
@@ -493,50 +537,48 @@ public class MotionCueService extends Service implements SensorEventListener {
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        if (testing) {
+        float[] v = event.values;
+        int type = event.sensor.getType();
+        if (type == Sensor.TYPE_GRAVITY) {
+            System.arraycopy(v, 0, gravity, 0, 3);
             return;
         }
-        float x = event.values[0];
-        float y = event.values[1];
-
-        if (!hasLinearSensor) {
-            // Фолбэк: убираем силу тяжести низкочастотным фильтром
-            gx = GRAVITY_ALPHA * gx + (1 - GRAVITY_ALPHA) * x;
-            gy = GRAVITY_ALPHA * gy + (1 - GRAVITY_ALPHA) * y;
-            x -= gx;
-            y -= gy;
+        if (type == Sensor.TYPE_ACCELEROMETER) {
+            // Низкочастотный фильтр: оценка силы тяжести, если нет датчика гравитации
+            for (int k = 0; k < 3; k++) {
+                lowAccel[k] = GRAVITY_ALPHA * lowAccel[k] + (1 - GRAVITY_ALPHA) * v[k];
+            }
+            if (!hasGravitySensor) {
+                System.arraycopy(lowAccel, 0, gravity, 0, 3);
+            }
+            if (primarySensor != accelSensor) {
+                return;   // ускорение берём из линейного датчика
+            }
+            processAcceleration(v[0] - gravity[0], v[1] - gravity[1], v[2] - gravity[2]);
+            return;
         }
+        if (type == Sensor.TYPE_LINEAR_ACCELERATION) {
+            processAcceleration(v[0], v[1], v[2]);
+        }
+    }
 
-        fx += SMOOTH_ALPHA * (x - fx);
-        fy += SMOOTH_ALPHA * (y - fy);
+    /** Ускорение автомобиля (без силы тяжести) → движение точек. */
+    private void processAcceleration(float ax, float ay, float az) {
+        if (testing) {
+            return;   // во время теста точки движутся по сценарию, датчик не мешает
+        }
+        smooth[0] += SMOOTH_ALPHA * (ax - smooth[0]);
+        smooth[1] += SMOOTH_ALPHA * (ay - smooth[1]);
+        smooth[2] += SMOOTH_ALPHA * (az - smooth[2]);
 
-        // Переводим оси устройства в оси экрана с учётом поворота
         int rotation = windowManager.getDefaultDisplay().getRotation();
-        float ux, uy;
-        switch (rotation) {
-            case Surface.ROTATION_90:
-                ux = -fy;
-                uy = -fx;
-                break;
-            case Surface.ROTATION_180:
-                ux = -fx;
-                uy = fy;
-                break;
-            case Surface.ROTATION_270:
-                ux = fy;
-                uy = fx;
-                break;
-            case Surface.ROTATION_0:
-            default:
-                ux = fx;
-                uy = -fy;
-                break;
-        }
+        float[] r = CueMotion.screenAccel(smooth, gravity, rotation);
 
         debugEvents++;
-
-        targetUx = ux;
-        targetUy = uy;
+        targetUx = r[0];
+        targetUy = r[1];
+        debugForward = r[2];
+        debugLateral = r[3];
         long nowNs = System.nanoTime();
         lastSensorNs = nowNs;
         debugSensorAtNs = nowNs;

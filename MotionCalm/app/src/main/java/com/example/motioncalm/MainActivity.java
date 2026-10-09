@@ -14,6 +14,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
@@ -31,6 +32,10 @@ public class MainActivity extends Activity implements SensorEventListener {
 
     /** Сколько символов примечаний к релизу показывать в статусе обновления. */
     private static final int MAX_NOTES_CHARS = 800;
+    /** Диагностика обновляется не чаще, чем раз в эту паузу: частые обновления дают «дрожание» текста. */
+    private static final long DEBUG_PERIOD_MS = 250;
+    /** Самая тонкая точка, dp. Ползунок толщины показывает значения от этой величины. */
+    private static final int MIN_THICKNESS_DP = 4;
 
     private Switch switchCue;
     private SeekBar seekIntensity;
@@ -38,6 +43,8 @@ public class MainActivity extends Activity implements SensorEventListener {
     private Button btnTest;
     private SeekBar seekAmp;
     private TextView tvAmp;
+    private SeekBar seekThickness;
+    private TextView tvThickness;
     private TextView tvIntensity;
     private TextView tvStatus;
     private TextView tvSensor;
@@ -55,6 +62,7 @@ public class MainActivity extends Activity implements SensorEventListener {
 
     private SharedPreferences prefs;
     private boolean updatingUi = false;
+    private long lastDebugUpdateMs = 0;
 
     /** Сборка, найденная последней проверкой. null — устанавливать пока нечего. */
     private ReleaseInfo pendingRelease;
@@ -72,6 +80,8 @@ public class MainActivity extends Activity implements SensorEventListener {
         btnTest = findViewById(R.id.btnTest);
         seekAmp = findViewById(R.id.seekAmp);
         tvAmp = findViewById(R.id.tvAmp);
+        seekThickness = findViewById(R.id.seekThickness);
+        tvThickness = findViewById(R.id.tvThickness);
         tvIntensity = findViewById(R.id.tvIntensity);
         tvStatus = findViewById(R.id.tvStatus);
         tvSensor = findViewById(R.id.tvSensor);
@@ -111,6 +121,28 @@ public class MainActivity extends Activity implements SensorEventListener {
             }
         });
 
+        int thickness = prefs.getInt(MotionCueService.KEY_THICKNESS, MotionCueService.DEFAULT_THICKNESS);
+        seekThickness.setProgress(Math.max(0, thickness - MIN_THICKNESS_DP));
+        updateThicknessLabel();
+        seekThickness.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateThicknessLabel();
+                if (fromUser && MotionCueService.running) {
+                    startCue();
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                prefs.edit().putInt(MotionCueService.KEY_THICKNESS, thicknessDp()).apply();
+            }
+        });
+
         btnTest.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -123,7 +155,8 @@ public class MainActivity extends Activity implements SensorEventListener {
                         .setAction(MotionCueService.ACTION_TEST)
                         .putExtra(MotionCueService.EXTRA_INTENSITY, seekIntensity.getProgress())
                         .putExtra(MotionCueService.EXTRA_DOTS, currentDotLevel())
-                        .putExtra(MotionCueService.EXTRA_AMP, seekAmp.getProgress());
+                        .putExtra(MotionCueService.EXTRA_AMP, seekAmp.getProgress())
+                        .putExtra(MotionCueService.EXTRA_THICKNESS, thicknessDp());
                 sendToService(intent);
                 setSwitchSilently(true);
             }
@@ -227,30 +260,40 @@ public class MainActivity extends Activity implements SensorEventListener {
         sensorManager.unregisterListener(this);
     }
 
+    /**
+     * Диагностика под ползунками. Обновляется не чаще четырёх раз в секунду, а все числа
+     * выведены фиксированной ширины, поэтому текст не дрожит и не сдвигает кнопки ниже.
+     */
     @Override
     public void onSensorChanged(SensorEvent event) {
+        long nowMs = SystemClock.elapsedRealtime();
+        if (nowMs - lastDebugUpdateMs < DEBUG_PERIOD_MS) {
+            return;
+        }
+        lastDebugUpdateMs = nowMs;
+        long nowNs = System.nanoTime();
         float x = event.values[0];
         float y = event.values[1];
         float z = event.values[2];
-        float mag = (float) Math.sqrt(x * x + y * y + z * z);
-        long nowNs = System.nanoTime();
         tvSensor.setText(String.format(Locale.US,
-                "Датчик (приложение): X %.2f  Y %.2f  Z %.2f м/с²\nВеличина: %.2f м/с²\n"
-                        + "Служба: работает %s, экран %s, датчик подписан %s\n"
-                        + "Окно с точками: %s, событий датчика %d, последнее %s\n"
-                        + "Кадров %d, последний %s. Перезапусков: датчик %d, кадры %d\n"
-                        + "Сдвиг точек: X %.2f  Y %.2f",
-                x, y, z, mag,
-                MotionCueService.running ? "да" : "нет",
+                "Экран: %-9s окно: %-3s\n"
+                        + "Датчик: %-9s служба: %-3s\n"
+                        + "Событие: %s\n"
+                        + "Кадр:    %s\n"
+                        + "Перезапуски: датч. %2d, кадры %2d\n"
+                        + "a, м/с²: %+6.2f %+6.2f %+6.2f\n"
+                        + "Вперёд %+6.2f  вбок %+6.2f\n"
+                        + "Точки: X %+6.1f  Y %+6.1f",
                 MotionCueService.debugScreenOn ? "включён" : "выключен",
-                MotionCueService.debugSensorOn ? "да" : "нет",
-                MotionCueService.debugOverlayAdded ? "добавлено" : "нет",
-                MotionCueService.debugEvents,
-                ageText(nowNs, MotionCueService.debugSensorAtNs),
-                MotionCueService.debugFrames,
-                ageText(nowNs, MotionCueService.debugFrameAtNs),
+                MotionCueService.debugOverlayAdded ? "да" : "нет",
+                MotionCueService.debugSensorOn ? "подписан" : "нет",
+                MotionCueService.running ? "да" : "нет",
+                ageCell(nowNs, MotionCueService.debugSensorAtNs),
+                ageCell(nowNs, MotionCueService.debugFrameAtNs),
                 MotionCueService.debugSensorRestarts,
                 MotionCueService.debugFrameRestarts,
+                x, y, z,
+                MotionCueService.debugForward, MotionCueService.debugLateral,
                 MotionCueService.debugUx, MotionCueService.debugUy));
     }
 
@@ -258,12 +301,13 @@ public class MainActivity extends Activity implements SensorEventListener {
     public void onAccuracyChanged(Sensor s, int accuracy) {
     }
 
-    /** «3.2 с назад» или «нет данных». */
-    private static String ageText(long nowNs, long atNs) {
+    /** Возраст последнего события фиксированной ширины: «  0.3 с назад» или «    — с назад». */
+    private static String ageCell(long nowNs, long atNs) {
         if (atNs == 0) {
-            return "нет данных";
+            return "    — с назад";
         }
-        return String.format(Locale.US, "%.1f с назад", (nowNs - atNs) / 1e9);
+        double sec = Math.min(999.9, (nowNs - atNs) / 1e9);
+        return String.format(Locale.US, "%5.1f с назад", sec);
     }
 
     private void startCue() {
@@ -271,7 +315,8 @@ public class MainActivity extends Activity implements SensorEventListener {
                 .setAction(MotionCueService.ACTION_START)
                 .putExtra(MotionCueService.EXTRA_INTENSITY, seekIntensity.getProgress())
                 .putExtra(MotionCueService.EXTRA_DOTS, currentDotLevel())
-                .putExtra(MotionCueService.EXTRA_AMP, seekAmp.getProgress());
+                .putExtra(MotionCueService.EXTRA_AMP, seekAmp.getProgress())
+                .putExtra(MotionCueService.EXTRA_THICKNESS, thicknessDp());
         sendToService(intent);
         setSwitchSilently(true);
     }
@@ -297,6 +342,15 @@ public class MainActivity extends Activity implements SensorEventListener {
             return 2;
         }
         return 1;
+    }
+
+    /** Толщина точки в dp: от MIN_THICKNESS_DP до MIN_THICKNESS_DP + максимум ползунка. */
+    private int thicknessDp() {
+        return MIN_THICKNESS_DP + seekThickness.getProgress();
+    }
+
+    private void updateThicknessLabel() {
+        tvThickness.setText(getString(R.string.thickness_label, thicknessDp()));
     }
 
     private void stopCue() {

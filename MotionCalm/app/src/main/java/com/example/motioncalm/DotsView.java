@@ -21,7 +21,8 @@ public class DotsView extends View {
     public static final int[] COUNTS = {5, 8, 12};
 
     private static final float MARGIN_DP = 14f;    // отступ от края
-    private static final float RADIUS_DP = 4f;     // радиус точки
+    private static final float MIN_DIAMETER_DP = 2f;
+    private static final float MAX_DIAMETER_DP = 24f;
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -30,6 +31,7 @@ public class DotsView extends View {
     private final List<float[]> base = new ArrayList<>();
     private int dotCount = COUNTS[1];
     private float intensity = 0.5f;
+    private float radiusDp = 4f;   // радиус точки в dp (диаметр 8 dp)
 
     private final DotPhysics physics = new DotPhysics();
     private float px, py;   // текущее смещение, пиксели
@@ -44,6 +46,13 @@ public class DotsView extends View {
     /** intensity от 0.1 до 1.0 */
     public void setIntensity(float value) {
         intensity = Math.max(0.1f, Math.min(1f, value));
+        invalidate();
+    }
+
+    /** Толщина точки (диаметр), dp. Ограничена разумными пределами. */
+    public void setDotSize(float diameterDp) {
+        float clamped = Math.max(MIN_DIAMETER_DP, Math.min(MAX_DIAMETER_DP, diameterDp));
+        radiusDp = clamped / 2f;
         invalidate();
     }
 
@@ -109,7 +118,7 @@ public class DotsView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        float r = RADIUS_DP * density;
+        float r = radiusDp * density;
         fill.setColor(Color.argb((int) (255 * intensity), 20, 20, 20));
         halo.setColor(Color.argb((int) (255 * intensity * 0.5f), 255, 255, 255));
 

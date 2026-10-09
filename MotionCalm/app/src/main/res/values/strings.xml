@@ -42,4 +42,5 @@
     <string name="battery_button">Разрешить работу в фоне</string>
     <string name="app_settings_button">Настройки приложения</string>
     <string name="battery_hint">Если после блокировки подсказки перестают работать, откройте настройки приложения и выберите «Батарея» → «Без ограничений». На некоторых телефонах есть список «спящих» приложений: уберите оттуда MotionCalm.</string>
+    <string name="thickness_label">Толщина точек: %1$d dp</string>
 </resources>
