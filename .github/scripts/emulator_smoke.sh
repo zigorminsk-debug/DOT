@@ -69,7 +69,9 @@ seed_prefs() {
     } > "$tmp"
     adb shell run-as "$PKG" mkdir -p "/data/data/$PKG/shared_prefs" || fail "run-as не работает: нужна отладочная сборка"
     # Файл передаём через stdin: он создаётся от имени приложения, без общих папок телефона
-    adb shell run-as "$PKG" sh -c "cat > /data/data/$PKG/shared_prefs/motioncalm.xml" < "$tmp" || fail "не удалось записать настройки приложения"
+    # adb склеивает аргументы в одну строку для телефона, поэтому команду берём в кавычки целиком:
+    # иначе «>» выполнит оболочка телефона, а не приложение
+    adb shell "run-as $PKG sh -c 'cat > /data/data/$PKG/shared_prefs/motioncalm.xml'" < "$tmp" || fail "не удалось записать настройки приложения"
     rm -f "$tmp"
 }
 
