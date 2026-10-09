@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Против укачивания</string>
+    <string name="title">Подсказки движения</string>
+    <string name="switch_label">Включить подсказки</string>
+    <string name="intensity_label">Интенсивность: %d%%</string>
+    <string name="test_button">Проверить движение точек (имитация поездки, 8 с)</string>
+    <string name="amp_label">Амплитуда движения: %d%%</string>
+    <string name="dots_label">Количество точек</string>
+    <string name="dots_few">Мало</string>
+    <string name="dots_medium">Средне</string>
+    <string name="dots_many">Много</string>
+    <string name="status_need_permission">Нужно разрешение «Поверх других окон». Откроется настройка — включите его и вернитесь в приложение.</string>
+    <string name="status_ready">Разрешение получено. Включите переключатель.</string>
+    <string name="status_running">Подсказки работают поверх других приложений.</string>
+    <string name="status_stopped">Подсказки выключены.</string>
+    <string name="how_it_works">Как это работает: по краям экрана появляются точки. Когда машина или транспорт разгоняется, тормозит или поворачивает, точки смещаются, и глаза получают визуальный ориентир движения. Это снижает конфликт между зрением и вестибулярной системой, как «Признаки движения» на iPhone.\n\nСовет: держите телефон так, чтобы видеть экран, например на столике или в держателе.</string>
+    <string name="notif_channel">Подсказки движения</string>
+    <string name="notif_text">Визуальные подсказки движения включены</string>
+    <string name="notif_stop">Выключить</string>
+</resources>
