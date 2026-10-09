@@ -57,19 +57,27 @@ grep -q "Success" <<< "$INSTALL_OUT" || fail "APK не установился"
 adb shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow
 
 echo "Запускаем службу подсказок"
-# Служба переднего плана с Android 12 не запускается из фона. Поэтому сначала открываем
-# приложение (оно становится видимым), и уже потом запускаем службу.
-adb shell am start -n "$PKG/.MainActivity" > /dev/null 2>&1
-sleep 3
+# Служба не экспортируется, поэтому извне её не запустить. Открываем приложение и нажимаем
+# переключатель подсказок: так проверяется тот же путь, что и у пользователя.
 adb logcat -c
-START_OUT=$(adb shell am start-foreground-service -n "$SVC" -a com.example.motioncalm.START 2>&1)
-echo "$START_OUT"
-if grep -qi "error\|exception\|denied" <<< "$START_OUT"; then
-    fail "служба не запустилась: $START_OUT"
+adb shell am start -n "$PKG/.MainActivity" > /dev/null 2>&1
+# Холодный запуск на эмуляторе занимает несколько секунд: ищем переключатель с повторами
+BOUNDS=""
+for attempt in 1 2 3 4 5 6 7 8; do
+    sleep 2
+    adb shell uiautomator dump /sdcard/window.xml > /dev/null 2>&1 || continue
+    XML=$(adb shell cat /sdcard/window.xml | tr -d '\r')
+    BOUNDS=$(grep -o 'resource-id="com.example.motioncalm:id/switchCue"[^>]*' <<< "$XML" | grep -o 'bounds="[^"]*"' | head -n 1)
+    [ -n "$BOUNDS" ] && break
+done
+if [ -z "$BOUNDS" ]; then
+    fail "переключатель подсказок не найден; видимые id: $(grep -o 'resource-id="[^"]*"' <<< "$XML" | head -n 8 | tr '\n' ' ')"
 fi
+read -r X1 Y1 X2 Y2 <<< "$(grep -o '[0-9]\+' <<< "$BOUNDS" | tr '\n' ' ')"
+adb shell input tap $(( (X1 + X2) / 2 )) $(( (Y1 + Y2) / 2 ))
 sleep 8
-service_alive || fail "процесс приложения не запустился"
-[ "$(heartbeats | grep -c heartbeat)" -ge 1 ] || fail "служба не пишет heartbeat после запуска"
+service_alive || fail "процесс приложения не запустился после включения переключателя"
+[ "$(heartbeats | grep -c heartbeat)" -ge 1 ] || fail "служба не пишет heartbeat после включения переключателя"
 
 echo "Выключаем экран"
 adb shell input keyevent 223                      # SLEEP
