@@ -1,5 +1,6 @@
 package com.example.motioncalm;
 
+import android.annotation.SuppressLint;
 import android.app.PendingIntent;
 import android.content.Intent;
 import android.os.Build;
@@ -29,8 +30,13 @@ public class CueTileService extends TileService {
             return;
         } else {
             try {
-                startForegroundService(new Intent(this, MotionCueService.class)
-                        .setAction(MotionCueService.ACTION_START));
+                Intent start = new Intent(this, MotionCueService.class)
+                        .setAction(MotionCueService.ACTION_START);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(start);
+                } else {
+                    startService(start);
+                }
             } catch (RuntimeException e) {
                 // Android не разрешил запуск из фона: открываем приложение, там запуск всегда доступен.
                 openApp();
@@ -54,6 +60,8 @@ public class CueTileService extends TileService {
         tile.updateTile();
     }
 
+    /** Открывает приложение. Старый вызов с Intent на Android 14+ запрещён, поэтому он только для старых версий. */
+    @SuppressLint("StartActivityAndCollapseDeprecated")
     private void openApp() {
         Intent app = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
