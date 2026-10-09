@@ -56,6 +56,17 @@ echo "$INSTALL_OUT"
 grep -q "Success" <<< "$INSTALL_OUT" || fail "APK не установился"
 adb shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow
 
+# Замеры расхода (пока только печатаем): тики процессора приложения, 1 тик = 10 мс
+app_pid() {
+    adb shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}'
+}
+cpu_ticks() {
+    local pid
+    pid=$(app_pid)
+    [ -n "$pid" ] || return 0
+    adb shell cat "/proc/$pid/stat" 2>/dev/null | tr -d '\r' | awk '{print $14 + $15}'
+}
+
 echo "Проверяем сохранённую амплитуду: выбор пользователя и настройки старой сборки"
 # Настройки подменяем в файле приложения. Это возможно в отладочной сборке (run-as), а CI собирает именно её.
 seed_prefs() {
@@ -181,6 +192,11 @@ awk -v v="$MAX_LAT" 'BEGIN { exit !(v + 0 >= 1.8) }' || fail "при повор�
 emu_accel "0:9.81:0"
 sleep 4
 
+W0=$(cpu_ticks)
+sleep 20
+W1=$(cpu_ticks)
+notice "Работа, экран включён, 20 с: процессор ${W0:-?} -> ${W1:-?} тиков"
+
 echo "Выключаем экран"
 adb shell input keyevent 223                      # SLEEP
 sleep 6
@@ -188,6 +204,12 @@ STATE=$(power_state)
 [ "$STATE" = "Asleep" ] || fail "экран не выключился, состояние: $STATE"
 sleep 6
 service_alive || fail "служба погибла, пока экран выключен"
+
+S0=$(cpu_ticks)
+sleep 20
+S1=$(cpu_ticks)
+notice "Сон, экран выключен, 20 с: процессор ${S0:-?} -> ${S1:-?} тиков"
+notice "Во сне в системе: датчики $(adb shell dumpsys sensorservice 2>/dev/null | grep -c "$PKG"), блокировки $(adb shell dumpsys power 2>/dev/null | grep -c "$PKG"), будильники $(adb shell dumpsys alarm 2>/dev/null | grep -c "$PKG")"
 
 echo "Включаем экран, как после разблокировки"
 adb logcat -c
