@@ -5,8 +5,11 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.PixelFormat;
 import android.hardware.Sensor;
@@ -14,18 +17,26 @@ import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Build;
-import android.view.Choreographer;
 import android.os.Handler;
-import android.os.Looper;
-import android.os.SystemClock;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.provider.Settings;
+import android.service.quicksettings.TileService;
+import android.util.Log;
+import android.view.Choreographer;
 import android.view.Surface;
 import android.view.WindowManager;
 
 /**
  * Фоновый сервис: показывает DotsView поверх всех приложений
  * и обновляет смещение точек по данным акселерометра.
+ *
+ * Датчик и цикл кадров работают только при включённом экране. Когда экран выключают,
+ * они останавливаются. Когда экран включают или телефон разблокируют, запускаются снова.
+ * Пока экран включён, сторож раз в секунду проверяет датчик, кадры и окно и чинит их,
+ * если они замолчали.
  */
 public class MotionCueService extends Service implements SensorEventListener {
 
@@ -41,29 +52,42 @@ public class MotionCueService extends Service implements SensorEventListener {
     static final String KEY_DOTS = "dots";
     static final String KEY_AMP = "amp";
 
-    /** true, пока сервис работает — читается из MainActivity. */
-    public static volatile boolean running = false;
-
-    /** Диагностика: сколько событий датчика получил сервис и какой сдвиг передал точкам. */
-    public static volatile int debugEvents = 0;
-    public static volatile float debugUx = 0f;
-    public static volatile float debugUy = 0f;
-    public static volatile boolean debugOverlayAdded = false;
-
+    private static final String TAG = "MotionCue";
     private static final String CHANNEL_ID = "motioncalm";
     private static final int NOTIF_ID = 1;
     private static final float GRAVITY_ALPHA = 0.9f;  // для фолбэка без linear-sensor
     private static final float SMOOTH_ALPHA = 0.25f;  // сглаживание ускорения
+    private static final long SENSOR_STALE_NS = 300_000_000L; // 0.3 с без данных -> точки возвращаются
+    private static final long TEST_DURATION_MS = 8000;
+    private static final long WATCHDOG_PERIOD_MS = 1000;
+    private static final long HEARTBEAT_PERIOD_NS = 5_000_000_000L;
+
+    /** true, пока сервис работает. Читают главный экран и плитка. */
+    public static volatile boolean running = false;
+
+    // Диагностика: показывается на главном экране и пишется в журнал.
+    public static volatile int debugEvents = 0;
+    public static volatile float debugUx = 0f;
+    public static volatile float debugUy = 0f;
+    public static volatile boolean debugOverlayAdded = false;
+    public static volatile boolean debugScreenOn = true;
+    public static volatile boolean debugSensorOn = false;
+    public static volatile long debugSensorAtNs = 0;
+    public static volatile long debugFrameAtNs = 0;
+    public static volatile int debugFrames = 0;
+    public static volatile int debugSensorRestarts = 0;
+    public static volatile int debugFrameRestarts = 0;
 
     private WindowManager windowManager;
+    private WindowManager.LayoutParams overlayParams;
     private SensorManager sensorManager;
+    private PowerManager powerManager;
     private Sensor sensor;
     private boolean hasLinearSensor;
     private DotsView dotsView;
 
     private float gx, gy;   // оценка силы тяжести (фолбэк)
     private float fx, fy;   // сглаженное ускорение в координатах устройства
-    private long lastTimestamp = 0;
 
     // Цель ускорения для физики точек. Датчик только обновляет цель,
     // а пересчёт делается на каждом кадре экрана (см. frameCallback).
@@ -71,20 +95,29 @@ public class MotionCueService extends Service implements SensorEventListener {
     private volatile float targetUy = 0f;
     private volatile long lastSensorNs = 0;
     private long lastFrameNs = 0;
-    private static final long SENSOR_STALE_NS = 300_000_000L; // 0.3 с без данных -> точки возвращаются
+
+    private boolean screenOn = true;
+    private boolean receiverRegistered = false;
+    private boolean sensorSubscribed = false;
+    private boolean frameLoopScheduled = false;
+    private long lastHeartbeatNs = 0;
 
     private final Choreographer.FrameCallback frameCallback = new Choreographer.FrameCallback() {
         @Override
         public void doFrame(long frameTimeNanos) {
+            frameLoopScheduled = false;
             if (dotsView == null) {
                 return;
             }
+            long nowNs = System.nanoTime();
             float dt = lastFrameNs == 0 ? 0.016f : (frameTimeNanos - lastFrameNs) * 1e-9f;
             lastFrameNs = frameTimeNanos;
+            debugFrameAtNs = nowNs;
+            debugFrames++;
 
             float ux = targetUx;
             float uy = targetUy;
-            boolean stale = System.nanoTime() - lastSensorNs > SENSOR_STALE_NS;
+            boolean stale = nowNs - lastSensorNs > SENSOR_STALE_NS;
             if (stale && !testing) {
                 ux = 0f;
                 uy = 0f;
@@ -93,14 +126,13 @@ public class MotionCueService extends Service implements SensorEventListener {
             dotsView.step(ux, uy, dt);
             debugUx = dotsView.getOffsetXdp();
             debugUy = dotsView.getOffsetYdp();
-            Choreographer.getInstance().postFrameCallback(this);
+            startFrameLoop();
         }
     };
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean testing = false;
     private long testStart = 0;
-    private static final long TEST_DURATION_MS = 8000;
 
     /** Имитация поездки без датчиков: разгон, ход, торможение. Проверяет только отрисовку. */
     private final Runnable testTick = new Runnable() {
@@ -123,18 +155,49 @@ public class MotionCueService extends Service implements SensorEventListener {
         }
     };
 
+    /** Выключение экрана, включение экрана и разблокировка. */
+    private final BroadcastReceiver screenReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                onScreenOff();
+            } else if (Intent.ACTION_SCREEN_ON.equals(action) || Intent.ACTION_USER_PRESENT.equals(action)) {
+                onScreenOn();
+            }
+        }
+    };
+
+    /** Сторож: пока экран включён, раз в секунду проверяет датчик, кадры и окно. */
+    private final Runnable watchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!running || !screenOn) {
+                return;
+            }
+            checkHealth();
+            handler.postDelayed(this, WATCHDOG_PERIOD_MS);
+        }
+    };
+
     @Override
     public void onCreate() {
         super.onCreate();
         windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
         sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+        powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
 
         sensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION);
         hasLinearSensor = sensor != null;
         if (!hasLinearSensor) {
             sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         }
+        screenOn = powerManager.isInteractive();
+        debugScreenOn = screenOn;
+        registerScreenReceiver();
         running = true;
+        Log.i(TAG, "служба создана, экран " + (screenOn ? "включён" : "выключен"));
+        requestTileRefresh();
     }
 
     @Override
@@ -144,15 +207,13 @@ public class MotionCueService extends Service implements SensorEventListener {
             return START_NOT_STICKY;
         }
 
-        // Сразу переводим сервис в foreground. После startForegroundService() Android ждёт
-        // вызова startForeground(), даже если сервис тут же остановится по ошибке.
+        // Сразу переводим сервис в foreground: после startForegroundService() Android ждёт startForeground().
         startAsForeground();
 
         boolean test = intent != null && ACTION_TEST.equals(intent.getAction());
         // Для обычной работы нужен датчик; тест движения обходится без него.
         if (!Settings.canDrawOverlays(this) || (sensor == null && !test)) {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-            stopSelf();
+            stopCue();
             return START_NOT_STICKY;
         }
 
@@ -165,16 +226,15 @@ public class MotionCueService extends Service implements SensorEventListener {
             intensity = prefs.getInt(KEY_INTENSITY, 50);
         }
 
-        if (dotsView == null) {
-            if (!addOverlay()) {
-                stopForeground(STOP_FOREGROUND_REMOVE);
-                stopSelf();
-                return START_NOT_STICKY;
-            }
-            if (sensor != null) {
-                sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME);
-            }
+        if (dotsView == null && !addOverlay()) {
+            stopCue();
+            return START_NOT_STICKY;
         }
+        if (screenOn) {
+            resumeCue();
+            scheduleWatchdog();
+        }
+
         int dots;
         if (intent != null && intent.hasExtra(EXTRA_DOTS)) {
             dots = intent.getIntExtra(EXTRA_DOTS, 1);
@@ -226,13 +286,178 @@ public class MotionCueService extends Service implements SensorEventListener {
             windowManager.addView(view, lp);
         } catch (RuntimeException e) {
             // Например, разрешение «поверх других окон» отозвали прямо перед запуском.
+            Log.w(TAG, "окно не добавилось: " + e);
             return false;
         }
         dotsView = view;
+        overlayParams = lp;
         debugOverlayAdded = true;
         lastFrameNs = 0;
-        Choreographer.getInstance().postFrameCallback(frameCallback);
         return true;
+    }
+
+    /** Возвращает окно, если система его убрала. false — окно вернуть не удалось. */
+    private boolean ensureOverlayAttached() {
+        if (dotsView == null || dotsView.isAttachedToWindow()) {
+            return true;
+        }
+        try {
+            windowManager.addView(dotsView, overlayParams);
+            debugOverlayAdded = true;
+            return true;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "окно не вернулось: " + e);
+            return false;
+        }
+    }
+
+    /** Датчик и цикл кадров при включённом экране. Безопасно вызывать многократно. */
+    private void resumeCue() {
+        if (dotsView == null) {
+            return;
+        }
+        subscribeSensor();
+        startFrameLoop();
+    }
+
+    private void onScreenOff() {
+        screenOn = false;
+        debugScreenOn = false;
+        Log.i(TAG, "экран выключен: останавливаю датчик, кадры и сторож");
+        handler.removeCallbacks(watchdog);
+        unsubscribeSensor();
+        stopFrameLoop();
+    }
+
+    private void onScreenOn() {
+        screenOn = true;
+        debugScreenOn = true;
+        if (dotsView == null) {
+            return;   // окно ещё не показано: при старте всё запустится само
+        }
+        Log.i(TAG, "экран включён: возобновляю датчик и кадры");
+        // Точки начинают с покоя, а не с последнего значения до выключения экрана.
+        targetUx = 0f;
+        targetUy = 0f;
+        lastFrameNs = 0;
+        if (!ensureOverlayAttached()) {
+            stopCue();
+            return;
+        }
+        resumeCue();
+        scheduleWatchdog();
+    }
+
+    private void subscribeSensor() {
+        if (sensorSubscribed || sensor == null || dotsView == null) {
+            return;
+        }
+        sensorSubscribed = sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME);
+        debugSensorOn = sensorSubscribed;
+        lastSensorNs = System.nanoTime();   // отсчёт тишины начинается заново
+        if (!sensorSubscribed) {
+            Log.w(TAG, "датчик не подключился");
+        }
+    }
+
+    private void unsubscribeSensor() {
+        if (!sensorSubscribed) {
+            return;
+        }
+        sensorManager.unregisterListener(this);
+        sensorSubscribed = false;
+        debugSensorOn = false;
+    }
+
+    private void startFrameLoop() {
+        if (frameLoopScheduled || dotsView == null) {
+            return;
+        }
+        frameLoopScheduled = true;
+        debugFrameAtNs = System.nanoTime();   // отсчёт тишины кадров начинается заново
+        Choreographer.getInstance().postFrameCallback(frameCallback);
+    }
+
+    private void stopFrameLoop() {
+        Choreographer.getInstance().removeFrameCallback(frameCallback);
+        frameLoopScheduled = false;
+    }
+
+    private void scheduleWatchdog() {
+        handler.removeCallbacks(watchdog);
+        handler.postDelayed(watchdog, WATCHDOG_PERIOD_MS);
+    }
+
+    /** Одна проверка сторожа. Вызывается раз в секунду, пока экран включён. */
+    private void checkHealth() {
+        long nowNs = System.nanoTime();
+
+        if (dotsView != null && !dotsView.isAttachedToWindow()) {
+            Log.w(TAG, "окно с точками пропало, возвращаю");
+            if (!ensureOverlayAttached()) {
+                stopCue();
+                return;
+            }
+        }
+
+        if (CueHealth.sensorNeedsSubscribe(screenOn, testing, sensor != null, sensorSubscribed,
+                nowNs, lastSensorNs)) {
+            if (sensorSubscribed) {
+                Log.w(TAG, "датчик молчит, переподписываюсь");
+                debugSensorRestarts++;
+                unsubscribeSensor();
+            }
+            subscribeSensor();
+        }
+
+        if (CueHealth.frameLoopNeedsStart(screenOn, dotsView != null, frameLoopScheduled,
+                nowNs, debugFrameAtNs)) {
+            Log.w(TAG, "кадры остановились, перезапускаю");
+            debugFrameRestarts++;
+            Choreographer.getInstance().removeFrameCallback(frameCallback);
+            frameLoopScheduled = false;
+            startFrameLoop();
+        }
+
+        if (nowNs - lastHeartbeatNs >= HEARTBEAT_PERIOD_NS) {
+            lastHeartbeatNs = nowNs;
+            Log.i(TAG, "heartbeat events=" + debugEvents
+                    + " frames=" + debugFrames
+                    + " screen=" + (screenOn ? "on" : "off")
+                    + " sensor=" + (sensorSubscribed ? "on" : "off")
+                    + " sensorRestarts=" + debugSensorRestarts
+                    + " frameRestarts=" + debugFrameRestarts);
+        }
+    }
+
+    private void registerScreenReceiver() {
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_USER_PRESENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(screenReceiver, filter);
+        }
+        receiverRegistered = true;
+    }
+
+    private void stopCue() {
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
+    }
+
+    private void requestTileRefresh() {
+        TileService.requestListeningState(this, new ComponentName(this, CueTileService.class));
+    }
+
+    /** Есть ли на телефоне датчик, которым измеряется движение. */
+    static boolean hasMotionSensor(Context context) {
+        SensorManager manager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
+        return manager != null
+                && (manager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION) != null
+                || manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null);
     }
 
     private void startAsForeground() {
@@ -312,7 +537,9 @@ public class MotionCueService extends Service implements SensorEventListener {
 
         targetUx = ux;
         targetUy = uy;
-        lastSensorNs = System.nanoTime();
+        long nowNs = System.nanoTime();
+        lastSensorNs = nowNs;
+        debugSensorAtNs = nowNs;
     }
 
     @Override
@@ -322,12 +549,18 @@ public class MotionCueService extends Service implements SensorEventListener {
     @Override
     public void onDestroy() {
         running = false;
-        debugOverlayAdded = false;
         testing = false;
         handler.removeCallbacks(testTick);
-        Choreographer.getInstance().removeFrameCallback(frameCallback);
-        if (sensorManager != null) {
-            sensorManager.unregisterListener(this);
+        handler.removeCallbacks(watchdog);
+        unsubscribeSensor();
+        stopFrameLoop();
+        if (receiverRegistered) {
+            try {
+                unregisterReceiver(screenReceiver);
+            } catch (IllegalArgumentException ignored) {
+                // приёмник уже снят
+            }
+            receiverRegistered = false;
         }
         if (dotsView != null) {
             try {
@@ -337,7 +570,10 @@ public class MotionCueService extends Service implements SensorEventListener {
             }
             dotsView = null;
         }
+        debugOverlayAdded = false;
         stopForeground(STOP_FOREGROUND_REMOVE);
+        requestTileRefresh();
+        Log.i(TAG, "служба остановлена");
         super.onDestroy();
     }
 

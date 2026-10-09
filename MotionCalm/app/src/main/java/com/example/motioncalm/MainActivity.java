@@ -2,6 +2,7 @@ package com.example.motioncalm;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -12,6 +13,7 @@ import android.hardware.SensorManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
@@ -40,6 +42,9 @@ public class MainActivity extends Activity implements SensorEventListener {
     private TextView tvStatus;
     private TextView tvSensor;
     private TextView tvVersion;
+    private TextView tvBattery;
+    private Button btnBattery;
+    private Button btnAppSettings;
     private Button btnCheckUpdate;
     private TextView tvUpdateStatus;
     private ProgressBar progressUpdate;
@@ -71,6 +76,9 @@ public class MainActivity extends Activity implements SensorEventListener {
         tvStatus = findViewById(R.id.tvStatus);
         tvSensor = findViewById(R.id.tvSensor);
         tvVersion = findViewById(R.id.tvVersion);
+        tvBattery = findViewById(R.id.tvBattery);
+        btnBattery = findViewById(R.id.btnBattery);
+        btnAppSettings = findViewById(R.id.btnAppSettings);
         btnCheckUpdate = findViewById(R.id.btnCheckUpdate);
         tvUpdateStatus = findViewById(R.id.tvUpdateStatus);
         progressUpdate = findViewById(R.id.progressUpdate);
@@ -190,6 +198,8 @@ public class MainActivity extends Activity implements SensorEventListener {
             }
         });
 
+        btnBattery.setOnClickListener(v -> requestBatteryWhitelist());
+        btnAppSettings.setOnClickListener(v -> openAppSettings());
         btnCheckUpdate.setOnClickListener(v -> checkForUpdates());
         btnInstallUpdate.setOnClickListener(v -> installUpdate());
 
@@ -205,6 +215,7 @@ public class MainActivity extends Activity implements SensorEventListener {
         super.onResume();
         setSwitchSilently(MotionCueService.running);
         updateStatus();
+        updateBatteryStatus();
         if (sensor != null) {
             sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI);
         }
@@ -222,20 +233,37 @@ public class MainActivity extends Activity implements SensorEventListener {
         float y = event.values[1];
         float z = event.values[2];
         float mag = (float) Math.sqrt(x * x + y * y + z * z);
+        long nowNs = System.nanoTime();
         tvSensor.setText(String.format(Locale.US,
-                "Датчик: X %.2f  Y %.2f  Z %.2f м/с²\nВеличина: %.2f м/с²\n"
-                        + "Сервис: работает %s, точки на экране %s\n"
-                        + "Событий от датчика в сервисе: %d\n"
+                "Датчик (приложение): X %.2f  Y %.2f  Z %.2f м/с²\nВеличина: %.2f м/с²\n"
+                        + "Служба: работает %s, экран %s, датчик подписан %s\n"
+                        + "Окно с точками: %s, событий датчика %d, последнее %s\n"
+                        + "Кадров %d, последний %s. Перезапусков: датчик %d, кадры %d\n"
                         + "Сдвиг точек: X %.2f  Y %.2f",
                 x, y, z, mag,
                 MotionCueService.running ? "да" : "нет",
-                MotionCueService.debugOverlayAdded ? "добавлены" : "не добавлены",
+                MotionCueService.debugScreenOn ? "включён" : "выключен",
+                MotionCueService.debugSensorOn ? "да" : "нет",
+                MotionCueService.debugOverlayAdded ? "добавлено" : "нет",
                 MotionCueService.debugEvents,
+                ageText(nowNs, MotionCueService.debugSensorAtNs),
+                MotionCueService.debugFrames,
+                ageText(nowNs, MotionCueService.debugFrameAtNs),
+                MotionCueService.debugSensorRestarts,
+                MotionCueService.debugFrameRestarts,
                 MotionCueService.debugUx, MotionCueService.debugUy));
     }
 
     @Override
     public void onAccuracyChanged(Sensor s, int accuracy) {
+    }
+
+    /** «3.2 с назад» или «нет данных». */
+    private static String ageText(long nowNs, long atNs) {
+        if (atNs == 0) {
+            return "нет данных";
+        }
+        return String.format(Locale.US, "%.1f с назад", (nowNs - atNs) / 1e9);
     }
 
     private void startCue() {
@@ -249,7 +277,7 @@ public class MainActivity extends Activity implements SensorEventListener {
     }
 
     /**
-     * Сервис уже запущен в foreground, поэтому новые настройки передаём обычным startService.
+     * Служба уже запущена в foreground, поэтому новые настройки передаём обычным startService.
      * startForegroundService нужен только для первого запуска.
      */
     private void sendToService(Intent intent) {
@@ -309,6 +337,31 @@ public class MainActivity extends Activity implements SensorEventListener {
         } catch (PackageManager.NameNotFoundException e) {
             return "?";
         }
+    }
+
+    // ---- Работа в фоне ----
+
+    /** Ограничивает ли телефон батарею для приложения: тогда он может усыпить подсказки. */
+    private void updateBatteryStatus() {
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        boolean unrestricted = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+        tvBattery.setText(unrestricted ? R.string.battery_ok : R.string.battery_warn);
+        btnBattery.setVisibility(unrestricted ? View.GONE : View.VISIBLE);
+    }
+
+    private void requestBatteryWhitelist() {
+        Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:" + getPackageName()));
+        try {
+            startActivity(intent);
+        } catch (ActivityNotFoundException e) {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        }
+    }
+
+    private void openAppSettings() {
+        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + getPackageName())));
     }
 
     // ---- Обновления ----

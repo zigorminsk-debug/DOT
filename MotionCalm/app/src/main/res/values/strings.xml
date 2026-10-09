@@ -33,4 +33,13 @@
     <string name="update_need_unknown_sources">Разрешите установку приложений из этого источника в открывшихся настройках и нажмите кнопку установки ещё раз.</string>
     <string name="update_installed">Обновление установлено.</string>
     <string name="update_failed">Установка не удалась: %1$s</string>
+    <string name="tile_label">Против укачивания</string>
+    <string name="tile_on">Включено</string>
+    <string name="tile_off">Выключено</string>
+    <string name="background_title">Работа в фоне</string>
+    <string name="battery_ok">Батарея: ограничений нет, телефон не должен усыплять приложение.</string>
+    <string name="battery_warn">Батарея: телефон может усыплять приложение, пока экран выключен.</string>
+    <string name="battery_button">Разрешить работу в фоне</string>
+    <string name="app_settings_button">Настройки приложения</string>
+    <string name="battery_hint">Если после блокировки подсказки перестают работать, откройте настройки приложения и выберите «Батарея» → «Без ограничений». На некоторых телефонах есть список «спящих» приложений: уберите оттуда MotionCalm.</string>
 </resources>
